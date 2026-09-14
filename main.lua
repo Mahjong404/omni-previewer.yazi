@@ -12,10 +12,6 @@ local function ext_of(url)
 	return tostring(url):lower():match("%.(%a+)$") or ""
 end
 
-local function word_url(url)
-	return WORD_EXTS[ext_of(url)] == true
-end
-
 -- ==================== Word page-image pipeline ====================
 
 local state_get = ya.sync(function(state, key)
@@ -70,8 +66,66 @@ local function show_image(job, image, page)
 	ya.preview_widget(job, err)
 end
 
+local function ansi_peek(job, text)
+	local lines = ui.lines(text, { ansi = true, tab_size = rt.preview.tab_size, width = job.area.w, wrap = ui.Wrap.YES })
+	local limit = job.area.h
+	if job.skip > 0 and job.skip >= #lines then
+		return ya.emit("peek", { math.max(0, #lines - limit), only_if = job.file.url, upper_bound = true })
+	end
+	local page = {}
+	for i = job.skip + 1, math.min(#lines, job.skip + limit) do
+		page[#page + 1] = lines[i]
+	end
+	ya.preview_widget(job, ui.Text(page):area(job.area))
+end
+
+local function text_cache(job)
+	local cha = job.file.cha
+	local h = 5381
+	local url = tostring(job.file.url)
+	for i = 1, #url do
+		h = (h * 33 + url:byte(i)) % 4294967296
+	end
+	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x.ansi",
+		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0))
+end
+
+local function read_file(path)
+	local ok, data = pcall(function()
+		local fh = io.open(path, "rb")
+		if not fh then
+			return nil
+		end
+		local d = fh:read("*a")
+		fh:close()
+		return d
+	end)
+	if ok then
+		return data
+	end
+end
+
+local function script_peek(job, script)
+	local cache = text_cache(job)
+	local text = read_file(cache)
+	if text == nil then
+		local output = Command(PYTHON)
+			:arg({ "-X", "utf8", plugin_file(script), tostring(job.file.path), cache })
+			:output()
+		if not output or not output.status.success then
+			return nil
+		end
+		text = output.stdout
+	end
+	return text
+end
+
 local function word_fallback(job)
 	if ext_of(job.file.url) == "docx" then
+		local text = script_peek(job, "docx_text.py")
+		if text then
+			return ansi_peek(job, text)
+		end
 		return require("docx-preview"):peek(job)
 	end
 	ya.preview_widget(job, ui.Text({ ui.Line("Page image will appear when ready (text preview is unavailable for this format)") }):area(job.area))
@@ -136,73 +190,37 @@ local function word_seek(job)
 	end
 end
 
--- ==================== XLSX table pipeline ====================
+-- ==================== Grid table pipeline ====================
 
-local function xlsx_cache(job)
-	local cha = job.file.cha
-	local h = 5381
-	local url = tostring(job.file.url)
-	for i = 1, #url do
-		h = (h * 33 + url:byte(i)) % 4294967296
-	end
-	return string.format("%s\\yazi\\xlsx-cache\\%08x-%x-%x.ansi",
-		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0))
-end
+local GRID_SCRIPTS = { xlsx = "xlsx.py", csv = "table.py" }
 
-local function read_file(path)
-	local ok, data = pcall(function()
-		local fh = io.open(path, "rb")
-		if not fh then
-			return nil
-		end
-		local d = fh:read("*a")
-		fh:close()
-		return d
-	end)
-	if ok then
-		return data
-	end
-end
-
-local function xlsx_peek(job)
-	local cache = xlsx_cache(job)
-	local text = read_file(cache)
+local function grid_peek(job)
+	local text = script_peek(job, GRID_SCRIPTS[ext_of(job.file.url)])
 	if text == nil then
-		local output, err = Command(PYTHON)
-			:arg({ "-X", "utf8", plugin_file("xlsx.py"), tostring(job.file.path), cache })
-			:output()
-		if not output or not output.status.success then
-			return require("empty").msg(job, tostring(err or (output and output.stderr) or "Python could not be started"))
-		end
-		text = output.stdout
+		return require("empty").msg(job, "Table render failed")
 	end
-
-	local lines = ui.lines(text, { ansi = true, tab_size = rt.preview.tab_size, width = job.area.w, wrap = ui.Wrap.NO })
-	local limit = job.area.h
-	if job.skip > 0 and job.skip >= #lines then
-		return ya.emit("peek", { math.max(0, #lines - limit), only_if = job.file.url, upper_bound = true })
-	end
-	local page = {}
-	for i = job.skip + 1, math.min(#lines, job.skip + limit) do
-		page[#page + 1] = lines[i]
-	end
-	ya.preview_widget(job, ui.Text(page):area(job.area))
+	ansi_peek(job, text)
 end
 
 -- ==================== Dispatch ====================
 
+local PAGE_EXTS = { pdf = true }
+for ext in pairs(WORD_EXTS) do
+	PAGE_EXTS[ext] = true
+end
+
 function M:peek(job)
 	local ext = ext_of(job.file.url)
-	if WORD_EXTS[ext] or ext == "pdf" then
+	if PAGE_EXTS[ext] then
 		return word_peek(job)
-	elseif ext == "xlsx" then
-		return xlsx_peek(job)
+	elseif GRID_SCRIPTS[ext] then
+		return grid_peek(job)
 	end
 end
 
 function M:preload(job)
 	local file = job.file
-	if not file or not (word_url(file.url) or ext_of(file.url) == "pdf") then
+	if not file or not PAGE_EXTS[ext_of(file.url)] then
 		return true
 	end
 	Command(PYTHON)
@@ -212,7 +230,7 @@ function M:preload(job)
 end
 
 function M:seek(job)
-	if word_url(job.file.url) or ext_of(job.file.url) == "pdf" then
+	if PAGE_EXTS[ext_of(job.file.url)] then
 		return word_seek(job)
 	end
 	return require("code"):seek(job)

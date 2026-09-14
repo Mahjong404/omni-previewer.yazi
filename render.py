@@ -12,6 +12,10 @@ import zipfile
 from contextlib import contextmanager
 from xml.etree import ElementTree
 
+# ---- platform layer (Windows) ----
+# Cross-platform swap points: CACHE dir (LOCALAPPDATA→XDG_CACHE_HOME), cache_lock
+# (msvcrt→fcntl.flock), PIPE_NAME/mutex (named pipe→Unix socket), and the
+# DETACHED_PROCESS/CREATE_NO_WINDOW subprocess flags.
 CACHE = Path(os.environ["LOCALAPPDATA"]) / "yazi/docx-pages"
 LIMIT = 64 * 1024 * 1024
 MAX_AGE = 3 * 86400
@@ -383,6 +387,36 @@ def render_page(entry, page, edge, pdf):
     return image
 
 
+def convert_to_pdf(source, entry, stat):
+    """Office document → PDF seam. Windows backend: persistent Word COM server,
+    with a detached one-shot --export fallback. A LibreOffice backend
+    (soffice --headless --convert-to pdf) slots in here for other platforms.
+    Returns the {"pages": n} metadata dict."""
+    validate_doc(source)
+    timeout = max(30, min(120, stat.st_size // (2 * 1024 * 1024) + 15))
+    try:
+        return export_via_server(source, entry, timeout)
+    except TransportError:
+        try:
+            return export_via_server(source, entry, timeout)
+        except TransportError:
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-X", "utf8", __file__, "--export", str(source), str(entry)],
+                    capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            finally:
+                cleanup_word(entry)
+            if result.returncode:
+                raise RuntimeError("Word conversion failed: " + result.stderr.strip()[-800:])
+            metadata = json.loads(result.stdout)
+    latest = source.stat()
+    if (latest.st_mtime_ns, latest.st_size) != (stat.st_mtime_ns, stat.st_size):
+        raise RuntimeError("Document changed during conversion; please preview again")
+    return metadata
+
+
 def render(source, page, edge, probe=False):
     source = source.resolve(strict=True)
     stat = source.stat()
@@ -406,28 +440,7 @@ def render(source, page, edge, probe=False):
                 if is_pdf:
                     metadata = {"pages": pdf_pages(source)}
                 else:
-                    validate_doc(source)
-                    timeout = max(30, min(120, stat.st_size // (2 * 1024 * 1024) + 15))
-                    try:
-                        metadata = export_via_server(source, entry, timeout)
-                    except TransportError:
-                        try:
-                            metadata = export_via_server(source, entry, timeout)
-                        except TransportError:
-                            try:
-                                result = subprocess.run(
-                                    [sys.executable, "-X", "utf8", __file__, "--export", str(source), str(entry)],
-                                    capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT,
-                                    creationflags=subprocess.CREATE_NO_WINDOW,
-                                )
-                            finally:
-                                cleanup_word(entry)
-                            if result.returncode:
-                                raise RuntimeError("Word conversion failed: " + result.stderr.strip()[-800:])
-                            metadata = json.loads(result.stdout)
-                    latest = source.stat()
-                    if (latest.st_mtime_ns, latest.st_size) != (stat.st_mtime_ns, stat.st_size):
-                        raise RuntimeError("Document changed during conversion; please preview again")
+                    metadata = convert_to_pdf(source, entry, stat)
                 manifest.write_text(json.dumps(metadata), encoding="utf-8")
                 (entry / "failed").unlink(missing_ok=True)
             metadata = json.loads(manifest.read_text(encoding="utf-8"))

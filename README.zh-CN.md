@@ -11,6 +11,7 @@
 - **渐进式预览**：先秒出提取文本，转换完成后自动替换为渲染页面图。
 - 经 Microsoft Word → PDF → `pdftoppm` 渲染，保留排版、图片、表格。
 - `J`/`K` 翻页，`F6` 在页面图/纯文本模式间切换。
+- 纯文本模式提取段落并以边框表格渲染文档内表格（`docx_text.py`，python-docx）。
 - 隐藏的可复用 Word 服务让文档热转换保持在约 0.5 秒，空闲 10 分钟自动退出。
 - 安全：只读打开、宏强制禁用（`AutomationSecurity=3`）、拒绝 ActiveX/`vbaProject`/可达外链，绝不触碰你正在使用的 Word 会话。
 - 有界缓存（`%LOCALAPPDATA%\yazi\docx-pages`）：总量 64 MiB，每文档最多 3 张页图，3 天未用自动清理。
@@ -26,12 +27,17 @@
 - 带边框的对齐表格预览，中英文宽度计算正确。
 - 真实单元格样式转 ANSI：填充色、字体色、加粗。
 - 合并单元格跨列渲染，居中保留。
-- 按文件指纹缓存输出，滚动零延迟（`%LOCALAPPDATA%\yazi\xlsx-cache`）。
+- 按文件指纹缓存输出，滚动零延迟（`%LOCALAPPDATA%\yazi\preview-cache`）。
+
+### CSV
+
+- 边框表格预览，首行加粗作为表头，经共享 `table.py` 网格渲染器输出。
+- 自动探测编码：UTF-8（含 BOM）与 GB18030。
 
 ## 依赖
 
 - Windows + 已安装 Microsoft Word（Word 管线）
-- Python 3，含 `openpyxl`、`pywin32`、`psutil`（`render.py`/`xlsx.py` 通过 `python.exe` 运行）
+- Python 3，含 `openpyxl`、`python-docx`、`pywin32`、`psutil`（`render.py`/`xlsx.py`/`table.py`/`docx_text.py` 通过 `python.exe` 运行）
 - [Poppler](https://github.com/oschwartz10612/poppler-windows)（`pdftoppm.exe` / `pdfinfo.exe`）
 - [Pandoc](https://pandoc.org/)（文本回退，依赖 `docx-preview.yazi` 插件）
 
@@ -49,7 +55,7 @@ url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,rtf,RTF}"
 run = "omni-previewer"
 
 [[plugin.prepend_previewers]]
-url = "*.{xlsx,XLSX}"
+url = "*.{xlsx,XLSX,csv,CSV}"
 run = "omni-previewer"
 
 [[plugin.prepend_previewers]]
@@ -74,11 +80,12 @@ desc = "切换 Word 图文/纯文本预览"
 
 ## 路线图
 
-- 更多格式：`pptx`、`ppt`、`xls`、`csv`、`md` 快速预览
+分阶段计划见 [docs/ROADMAP.md](./docs/ROADMAP.md)。
+
+- 更多格式：`pptx`、`ppt`、`xls` 快速预览
 - `.ipynb` 渲染；`.git` 仓库信息（log/status 摘要）支持
 - 归档（`zip`/`rar`）预览增强：提速 + 更丰富的列表
-- macOS/Linux 支持：Word 管线目前依赖 Windows COM，跨平台需改用 LibreOffice 无界面转换（`soffice --convert-to pdf`），xlsx 管线本身跨平台可用
-- `docx-preview` 回退依赖解耦（内置文本提取）
+- macOS/Linux 支持：Word 管线目前依赖 Windows COM，跨平台需改用 LibreOffice 无界面转换（`soffice --convert-to pdf`），表格管线本身跨平台可用
 
 ## License
 
