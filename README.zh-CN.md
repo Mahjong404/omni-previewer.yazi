@@ -34,12 +34,24 @@
 - 边框表格预览，首行加粗作为表头，经共享 `table.py` 网格渲染器输出。
 - 自动探测编码：UTF-8（含 BOM）与 GB18030。
 
+### Markdown（`md`、`markdown`）
+
+- 默认**渲染视图**；`F6` 在渲染/原文之间切换。
+- 标题、粗体/斜体/删除线、行内代码、链接、列表、引用块、分割线。
+- 围栏代码块保留 Pygments 语法高亮（如 `asm`、`python`、`rust`）。
+- Markdown 表格渲染为与 Word/XLSX 相同的边框网格。
+- 公式：`$...$` 与 `$$...$$` 转为 Unicode 文本（分式、根号、希腊字母、上下标）；矩阵、`\begin{}` 环境等复杂结构回退为 matplotlib 透明底 PNG。
+- PlantUML 围栏经 `plantuml.jar -utxt` 渲染为 **Unicode 文本图**；utxt 无法表达的图类型回退为透明底 PNG。
+- Mermaid `flowchart`/`graph`/`sequenceDiagram` 渲染为文本（箭头、标签、注释）；其他图类型在装有 `mmdc` 时回退为 PNG。
+- 图片（`![alt](path)`，相对路径按文档目录解析）滚动到对应行时在预览区显示；远程 URL 显示占位符。
+
 ## 依赖
 
 - Windows + 已安装 Microsoft Word（Word 管线）
-- Python 3，含 `openpyxl`、`python-docx`、`pywin32`、`psutil`（`render.py`/`xlsx.py`/`table.py`/`docx_text.py` 通过 `python.exe` 运行）
+- Python 3，含 `openpyxl`、`python-docx`、`pywin32`、`psutil`（`render.py`/`xlsx.py`/`table.py`/`docx_text.py`/`md.py` 通过 `python.exe` 运行）
 - [Poppler](https://github.com/oschwartz10612/poppler-windows)（`pdftoppm.exe` / `pdfinfo.exe`）
 - [Pandoc](https://pandoc.org/)（文本回退，依赖 `docx-preview.yazi` 插件）
+- 可选：Java + `plantuml.jar`（PlantUML 文本渲染）、`matplotlib`（复杂公式 PNG）、`mmdc`（Mermaid PNG 回退）、`pygments`（代码块高亮）
 
 ## 安装
 
@@ -55,7 +67,7 @@ url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,rtf,RTF}"
 run = "omni-previewer"
 
 [[plugin.prepend_previewers]]
-url = "*.{xlsx,XLSX,csv,CSV}"
+url = "*.{xlsx,XLSX,csv,CSV,md,markdown}"
 run = "omni-previewer"
 
 [[plugin.prepend_previewers]]

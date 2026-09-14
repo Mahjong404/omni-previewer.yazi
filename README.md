@@ -34,12 +34,24 @@ All-in-one document previewer for [Yazi](https://github.com/sxyazi/yazi), focuse
 - Bordered table preview with a bold header row, via the shared `table.py` grid renderer.
 - Encoding sniffed: UTF-8 (with/without BOM) and GB18030.
 
+### Markdown (`md`, `markdown`)
+
+- **Rendered view** by default; `F6` toggles rendered / raw source.
+- Headings, bold/italic/strikethrough, inline code, links, lists, block quotes, horizontal rules.
+- Fenced code blocks keep full Pygments syntax highlighting (e.g. `asm`, `python`, `rust`).
+- Markdown tables render as the same bordered grid as Word/XLSX tables.
+- Math: `$...$` and `$$...$$` are converted to Unicode text (fractions, roots, Greek letters, super/subscripts); complex constructs (matrices, `\begin{...}` environments, etc.) fall back to a transparent PNG via matplotlib.
+- PlantUML fences render as **Unicode text diagrams** via `plantuml.jar -utxt` (with a transparent-PNG fallback for diagram types utxt cannot express).
+- Mermaid `flowchart`/`graph`/`sequenceDiagram` render as text (arrows, labels, notes); other diagram types fall back to `mmdc` PNG when installed.
+- Images (`![alt](path)`, relative paths resolved against the document) display in the preview pane when scrolled into view; remote URLs show a placeholder.
+
 ## Requirements
 
 - Windows + Microsoft Word installed (for Word pipeline)
-- Python 3 with `openpyxl`, `python-docx`, `pywin32`, `psutil` (`render.py`/`xlsx.py`/`table.py`/`docx_text.py` run via `python.exe`)
+- Python 3 with `openpyxl`, `python-docx`, `pywin32`, `psutil` (`render.py`/`xlsx.py`/`table.py`/`docx_text.py`/`md.py` run via `python.exe`)
 - [Poppler](https://github.com/oschwartz10612/poppler-windows) (`pdftoppm.exe`)
 - [Pandoc](https://pandoc.org/) (text fallback, via the `docx-preview.yazi` plugin)
+- Optional: Java + `plantuml.jar` (PlantUML text rendering), `matplotlib` (complex math PNG), `mmdc` (Mermaid PNG fallback), `pygments` (code-block highlighting)
 
 ## Installation
 
@@ -55,11 +67,15 @@ url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,rtf,RTF}"
 run = "omni-previewer"
 
 [[plugin.prepend_previewers]]
-url = "*.{xlsx,XLSX,csv,CSV}"
+url = "*.{xlsx,XLSX,csv,CSV,md,markdown}"
+run = "omni-previewer"
+
+[[plugin.prepend_previewers]]
+url = "*.{pdf,PDF}"
 run = "omni-previewer"
 
 [[plugin.prepend_preloaders]]
-url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,rtf,RTF}"
+url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,rtf,RTF,pdf,PDF}"
 run = "omni-previewer"
 ```
 

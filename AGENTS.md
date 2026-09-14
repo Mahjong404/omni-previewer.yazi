@@ -14,6 +14,7 @@
 - `table.py` — ANSI grid renderer + text-table adapters (csv, docx tables).
 - `xlsx.py` — XLSX adapter (openpyxl, colors/merges).
 - `docx_text.py` — DOCX text extractor for text-mode preview.
+- `md.py` — Markdown renderer (headings/tables/code/math/diagrams), emits a `{text, media}` manifest.
 
 ## Testing
 

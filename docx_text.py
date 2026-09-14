@@ -24,7 +24,7 @@ def para_line(p, out):
         out.append(text)
 
 
-def table_block(tbl, out):
+def table_block(tbl, out, max_width=0):
     rows = []
     prev_tcs = set()
     for row in tbl.rows[: table.MAX_ROWS]:
@@ -43,17 +43,17 @@ def table_block(tbl, out):
             spans.append(1)
         prev_tcs = tcs
         rows.append((cells[: table.MAX_COLS], spans[: table.MAX_COLS]))
-    out.extend(table.grid_lines(rows).splitlines())
+    out.extend(table.grid_lines(rows, max_width=max_width).splitlines())
 
 
-def extract(path):
+def extract(path, max_width=0):
     doc = Document(path)
     out = []
     for el in doc.element.body:
         if el.tag == W_NS + "p":
             para_line(Paragraph(el, doc), out)
         elif el.tag == W_NS + "tbl":
-            table_block(Table(el, doc), out)
+            table_block(Table(el, doc), out, max_width)
     lines, i = [], 0
     while i < len(out):
         if out[i] == "" and (not lines or lines[-1] == ""):
@@ -68,7 +68,7 @@ def extract(path):
 
 if __name__ == "__main__":
     try:
-        text = extract(sys.argv[1])
+        text = extract(sys.argv[1], int(sys.argv[3]) if len(sys.argv) > 3 else 0)
         if len(sys.argv) > 2:
             table.write_cache(text, sys.argv[2])
         sys.stdout.write(text)

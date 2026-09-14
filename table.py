@@ -1,29 +1,39 @@
 import csv
 import io
 import os
+import re
 import sys
 import time
 import unicodedata
 
 MAX_ROWS, MAX_COLS, CELL_MAX = 300, 20, 40
 DIM, RESET, BOLD, TITLE = "\x1b[90m", "\x1b[0m", "\x1b[1m", "\x1b[1;36m"
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def width(text):
+    text = ANSI.sub("", text)
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def fit(text, w):
     if width(text) <= w:
         return text + " " * (w - width(text))
-    out, n = "", 0
-    for c in text:
+    out, n, i = "", 0, 0
+    while i < len(text):
+        m = ANSI.match(text, i)
+        if m:
+            out += m.group(0)
+            i = m.end()
+            continue
+        c = text[i]
         cw = 2 if unicodedata.east_asian_width(c) in "WF" else 1
         if n + cw > w - 1:
             break
         out += c
         n += cw
-    return out + "…" + " " * (w - n - 1)
+        i += 1
+    return out + RESET + "…" + " " * (w - n - 1)
 
 
 def fit_center(text, w):
@@ -32,20 +42,44 @@ def fit_center(text, w):
     return " " * lead + t + " " * max(0, w - lead - width(t))
 
 
-def grid_lines(rows, header=None):
+def wrap_cell(text, w):
+    """Hard-wrap text to display width w, preserving ANSI spans; returns padded lines."""
+    lines = []
+    for seg in str(text).split("\n"):
+        cur, n, i = "", 0, 0
+        while i < len(seg):
+            m = ANSI.match(seg, i)
+            if m:
+                cur += m.group(0)
+                i = m.end()
+                continue
+            c = seg[i]
+            cw = 2 if unicodedata.east_asian_width(c) in "WF" else 1
+            if n + cw > w:
+                lines.append(cur)
+                cur, n = "", 0
+            cur += c
+            n += cw
+            i += 1
+        lines.append(cur)
+    return [l + " " * max(0, w - width(l)) for l in lines] or [""]
+
+
+def grid_lines(rows, header=None, max_width=0):
     """rows: list of (cells, spans) — cells: list[str], spans: list[int].
-    Plain text grid with box-drawing borders; header=True renders row 0 bold with a divider."""
+    Plain text grid with box-drawing borders; cells wrap instead of truncating;
+    header=True renders row 0 bold with a divider. max_width caps total width."""
     buf = io.StringIO()
     real = sys.stdout
     sys.stdout = buf
     try:
-        _grid_body(rows, header)
+        _grid_body(rows, header, max_width)
     finally:
         sys.stdout = real
     return buf.getvalue()
 
 
-def _grid_body(rows, header=None):
+def _grid_body(rows, header=None, max_width=0):
     rows = [(cells, spans) for cells, spans in rows if any(cells)]
     while rows and not any(rows[-1][0]):
         rows.pop()
@@ -60,24 +94,37 @@ def _grid_body(rows, header=None):
             if span == 1 and c < ncols:
                 colw[c] = min(max(colw[c], width(text)), CELL_MAX)
             c += span
+    avail = max_width - 3 * ncols - 1
+    if max_width and sum(colw) > avail:
+        while sum(colw) > max(avail, 4 * ncols):
+            i = colw.index(max(colw))
+            if colw[i] <= 4:
+                break
+            colw[i] -= 1
 
     def border(left, mid, right):
         print(DIM + left + mid.join("─" * (w + 2) for w in colw) + right + RESET)
 
-    def emit(text, w, bold=False):
-        t = (BOLD + text + RESET) if bold else text
-        return " " + t + " " + DIM + "│" + RESET
-
     border("┌", "┬", "┐")
     for ri, (cells, spans) in enumerate(rows):
-        out = DIM + "│" + RESET
-        c = 0
+        wrapped, c = [], 0
         for text, span in zip(cells, spans):
             w = sum(colw[c:c + span]) + 3 * (span - 1)
-            body = fit_center(text, w) if span > 1 else fit(text, w)
-            out += emit(body, w, bold=bool(header) and ri == 0)
+            wrapped.append((wrap_cell(text, w), span, w))
             c += span
-        print(out)
+        height = max(len(wl) for wl, _, _ in wrapped)
+        bold = bool(header) and ri == 0
+        for h in range(height):
+            out = DIM + "│" + RESET
+            for wl, span, w in wrapped:
+                body = wl[h] if h < len(wl) else " " * w
+                if span > 1 and h == 0:
+                    pad = max(0, (w - width(wl[0].rstrip())) // 2)
+                    body = " " * pad + wl[0].rstrip() + " " * max(0, w - pad - width(wl[0].rstrip()))
+                if bold:
+                    body = BOLD + body + RESET
+                out += " " + body + " " + DIM + "│" + RESET
+            print(out)
         if header and ri == 0:
             border("├", "┼", "┤")
     border("└", "┴", "┘")
@@ -139,8 +186,9 @@ def write_cache(text, cache):
 
 def main():
     path = sys.argv[1]
+    max_width = int(sys.argv[3]) if len(sys.argv) > 3 else 0
     rows = csv_rows(path)
-    out = grid_lines(rows, header=True)
+    out = grid_lines(rows, header=True, max_width=max_width)
     if len(sys.argv) > 2:
         write_cache(out, sys.argv[2])
     sys.stdout.write(out)

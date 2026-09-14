@@ -45,7 +45,8 @@ end)
 
 local toggle = ya.sync(function(state)
 	local hovered = cx.active.current.hovered
-	if not (hovered and WORD_EXTS[ext_of(hovered.url)]) then
+	local ext = hovered and ext_of(hovered.url) or ""
+	if not (hovered and (WORD_EXTS[ext] or ext == "md" or ext == "markdown")) then
 		return nil
 	end
 	state.text_mode = not state.text_mode
@@ -110,7 +111,7 @@ local function script_peek(job, script)
 	local text = read_file(cache)
 	if text == nil then
 		local output = Command(PYTHON)
-			:arg({ "-X", "utf8", plugin_file(script), tostring(job.file.path), cache })
+			:arg({ "-X", "utf8", plugin_file(script), tostring(job.file.path), cache, tostring(job.area.w) })
 			:output()
 		if not output or not output.status.success then
 			return nil
@@ -202,6 +203,34 @@ local function grid_peek(job)
 	ansi_peek(job, text)
 end
 
+-- ==================== Markdown pipeline ====================
+
+local MD_EXTS = { md = true, markdown = true }
+
+local function md_peek(job)
+	local text_mode = state_get(identity(job))
+	if text_mode then
+		return require("code"):peek(job)
+	end
+	local raw = script_peek(job, "md.py")
+	if raw == nil then
+		return require("code"):peek(job)
+	end
+	local manifest = ya.json_decode(raw)
+	if type(manifest) ~= "table" or not manifest.text then
+		return ansi_peek(job, raw)
+	end
+	local limit = job.area.h
+	for _, m in ipairs(manifest.media or {}) do
+		local ln = tonumber(m.line) or -1
+		if m.path and ln > job.skip and ln <= job.skip + math.max(1, math.floor(limit / 2)) then
+			local _, err = ya.image_show(Url(m.path), job.area)
+			return ya.preview_widget(job, err)
+		end
+	end
+	ansi_peek(job, manifest.text)
+end
+
 -- ==================== Dispatch ====================
 
 local PAGE_EXTS = { pdf = true }
@@ -215,6 +244,8 @@ function M:peek(job)
 		return word_peek(job)
 	elseif GRID_SCRIPTS[ext] then
 		return grid_peek(job)
+	elseif MD_EXTS[ext] then
+		return md_peek(job)
 	end
 end
 
@@ -252,6 +283,7 @@ function M:entry(job)
 		ya.emit("peek", { tonumber(parts[#parts]) or 0, force = true })
 		return
 	end
+
 	local text_mode = toggle()
 	if text_mode == nil then
 		return
