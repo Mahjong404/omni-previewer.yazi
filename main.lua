@@ -48,6 +48,10 @@ local state_unfail = ya.sync(function(state)
 end)
 
 local toggle = ya.sync(function(state)
+	local hovered = cx.active.current.hovered
+	if not (hovered and WORD_EXTS[ext_of(hovered.url)]) then
+		return nil
+	end
 	state.text_mode = not state.text_mode
 	state.failed = {}
 	state.pending = {}
@@ -230,11 +234,10 @@ function M:entry(job)
 		ya.emit("peek", { tonumber(parts[#parts]) or 0, force = true })
 		return
 	end
-	local hovered = cx.active.current.hovered
-	if not (hovered and word_url(hovered.url)) then
+	local text_mode = toggle()
+	if text_mode == nil then
 		return
 	end
-	local text_mode = toggle()
 	ya.notify({ title = "Word preview", content = text_mode and "Text mode" or "Page image mode", timeout = 2 })
 	ya.emit("peek", { 0, force = true })
 end
