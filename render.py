@@ -21,6 +21,7 @@ CONNECT_TIMEOUT = 20
 SERVER_IDLE = 600
 PIPE_NAME = r"\\.\pipe\yazi-docx-svc"
 PDFTOPPM = r"C:\software\CLI\poppler\Library\bin\pdftoppm.exe"
+PDFINFO = r"C:\software\CLI\poppler\Library\bin\pdfinfo.exe"
 YA = r"C:\software\CLI\yazi\ya.exe"
 
 
@@ -349,7 +350,19 @@ def serve():
         identity_path.unlink(missing_ok=True)
 
 
-def render_page(entry, page, edge):
+def pdf_pages(source):
+    result = subprocess.run(
+        [PDFINFO, str(source)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    m = re.search(r"^Pages:\s+(\d+)", result.stdout, re.MULTILINE)
+    if result.returncode or not m:
+        raise RuntimeError("Could not read PDF page count: " + result.stderr.strip()[-300:])
+    return int(m.group(1))
+
+
+def render_page(entry, page, edge, pdf):
     image = entry / f"page-{page}-{edge}.jpg"
     if image.exists():
         return image
@@ -357,7 +370,7 @@ def render_page(entry, page, edge):
     result = subprocess.run(
         [PDFTOPPM, "-f", str(page + 1), "-l", str(page + 1), "-singlefile",
          "-scale-to", str(edge), "-jpeg", "-jpegopt", "quality=75",
-         str(entry / "document.pdf"), str(tmp.with_suffix(""))],
+         str(pdf), str(tmp.with_suffix(""))],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
@@ -387,30 +400,34 @@ def render(source, page, edge, probe=False):
                 if (entry / "failed").exists():
                     raise ProbeMiss("PREVFAILED: conversion previously failed")
                 raise ProbeMiss("Document is not converted yet")
+            is_pdf = source.suffix.lower() == ".pdf"
             if converted:
                 entry.mkdir(exist_ok=True)
-                validate_doc(source)
-                timeout = max(30, min(120, stat.st_size // (2 * 1024 * 1024) + 15))
-                try:
-                    metadata = export_via_server(source, entry, timeout)
-                except TransportError:
+                if is_pdf:
+                    metadata = {"pages": pdf_pages(source)}
+                else:
+                    validate_doc(source)
+                    timeout = max(30, min(120, stat.st_size // (2 * 1024 * 1024) + 15))
                     try:
                         metadata = export_via_server(source, entry, timeout)
                     except TransportError:
                         try:
-                            result = subprocess.run(
-                                [sys.executable, "-X", "utf8", __file__, "--export", str(source), str(entry)],
-                                capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT,
-                                creationflags=subprocess.CREATE_NO_WINDOW,
-                            )
-                        finally:
-                            cleanup_word(entry)
-                        if result.returncode:
-                            raise RuntimeError("Word conversion failed: " + result.stderr.strip()[-800:])
-                        metadata = json.loads(result.stdout)
-                latest = source.stat()
-                if (latest.st_mtime_ns, latest.st_size) != (stat.st_mtime_ns, stat.st_size):
-                    raise RuntimeError("Document changed during conversion; please preview again")
+                            metadata = export_via_server(source, entry, timeout)
+                        except TransportError:
+                            try:
+                                result = subprocess.run(
+                                    [sys.executable, "-X", "utf8", __file__, "--export", str(source), str(entry)],
+                                    capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT,
+                                    creationflags=subprocess.CREATE_NO_WINDOW,
+                                )
+                            finally:
+                                cleanup_word(entry)
+                            if result.returncode:
+                                raise RuntimeError("Word conversion failed: " + result.stderr.strip()[-800:])
+                            metadata = json.loads(result.stdout)
+                    latest = source.stat()
+                    if (latest.st_mtime_ns, latest.st_size) != (stat.st_mtime_ns, stat.st_size):
+                        raise RuntimeError("Document changed during conversion; please preview again")
                 manifest.write_text(json.dumps(metadata), encoding="utf-8")
                 (entry / "failed").unlink(missing_ok=True)
             metadata = json.loads(manifest.read_text(encoding="utf-8"))
@@ -419,14 +436,15 @@ def render(source, page, edge, probe=False):
                     json.dumps({"url": str(source), "pages": metadata["pages"]}), encoding="utf-8")
             except Exception:
                 pass
+            pdf = source if is_pdf else entry / "document.pdf"
             page = max(0, min(page, metadata["pages"] - 1))
             targets = {page, page + 1} | ({0, 1, 2} if converted else set())
             for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
                 try:
-                    render_page(entry, target, edge)
+                    render_page(entry, target, edge, pdf)
                 except Exception:
                     pass
-            image = render_page(entry, page, edge)
+            image = render_page(entry, page, edge, pdf)
             os.utime(image, None)
             pages = sorted(entry.glob("page-*.jpg"), key=lambda f: f.stat().st_mtime, reverse=True)
             for obsolete in pages[3:]:
@@ -448,7 +466,7 @@ def render(source, page, edge, probe=False):
 
 def notify(url, page):
     try:
-        subprocess.run([YA, "emit", "plugin", "docx-pages", f"refresh|{url}|{page}"],
+        subprocess.run([YA, "emit", "plugin", "omni-previewer", f"refresh|{url}|{page}"],
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception:

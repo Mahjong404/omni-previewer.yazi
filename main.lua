@@ -189,7 +189,7 @@ end
 
 function M:peek(job)
 	local ext = ext_of(job.file.url)
-	if WORD_EXTS[ext] then
+	if WORD_EXTS[ext] or ext == "pdf" then
 		return word_peek(job)
 	elseif ext == "xlsx" then
 		return xlsx_peek(job)
@@ -198,7 +198,7 @@ end
 
 function M:preload(job)
 	local file = job.file
-	if not file or not word_url(file.url) then
+	if not file or not (word_url(file.url) or ext_of(file.url) == "pdf") then
 		return true
 	end
 	Command(PYTHON)
@@ -208,7 +208,7 @@ function M:preload(job)
 end
 
 function M:seek(job)
-	if word_url(job.file.url) then
+	if word_url(job.file.url) or ext_of(job.file.url) == "pdf" then
 		return word_seek(job)
 	end
 	return require("code"):seek(job)
@@ -228,6 +228,10 @@ function M:entry(job)
 	if parts[1] == "refresh" then
 		state_unfail()
 		ya.emit("peek", { tonumber(parts[#parts]) or 0, force = true })
+		return
+	end
+	local hovered = cx.active.current.hovered
+	if not (hovered and word_url(hovered.url)) then
 		return
 	end
 	local text_mode = toggle()
