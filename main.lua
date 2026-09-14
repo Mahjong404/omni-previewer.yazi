@@ -1,7 +1,9 @@
 local M = {}
 
 local PYTHON = "C:\\software\\anaconda3\\python.exe"
-local WORD_EXTS = { docx = true, doc = true, docm = true, dotx = true, dotm = true, rtf = true }
+local WORD_EXTS = { docx = true, doc = true, docm = true, dotx = true, dotm = true, dot = true, rtf = true }
+local PPT_EXTS = { pptx = true, pptm = true, ppt = true, ppsx = true, ppsm = true, pps = true,
+	potx = true, potm = true, pot = true }
 
 local function plugin_file(name)
 	local config = os.getenv("YAZI_CONFIG_HOME") or (os.getenv("APPDATA") .. "/yazi/config")
@@ -52,7 +54,7 @@ local toggle = ya.sync(function(state)
 	state.text_mode = not state.text_mode
 	state.failed = {}
 	state.pending = {}
-	return state.text_mode
+	return state.text_mode, cx.active.preview.skip
 end)
 
 local function identity(job)
@@ -193,7 +195,7 @@ end
 
 -- ==================== Grid table pipeline ====================
 
-local GRID_SCRIPTS = { xlsx = "xlsx.py", csv = "table.py" }
+local GRID_SCRIPTS = { xlsx = "xlsx.py", xls = "xlsx.py", csv = "table.py" }
 
 local function grid_peek(job)
 	local text = script_peek(job, GRID_SCRIPTS[ext_of(job.file.url)])
@@ -235,6 +237,9 @@ end
 
 local PAGE_EXTS = { pdf = true }
 for ext in pairs(WORD_EXTS) do
+	PAGE_EXTS[ext] = true
+end
+for ext in pairs(PPT_EXTS) do
 	PAGE_EXTS[ext] = true
 end
 
@@ -284,12 +289,12 @@ function M:entry(job)
 		return
 	end
 
-	local text_mode = toggle()
+	local text_mode, skip = toggle()
 	if text_mode == nil then
 		return
 	end
 	ya.notify({ title = "Word preview", content = text_mode and "Text mode" or "Page image mode", timeout = 2 })
-	ya.emit("peek", { 0, force = true })
+	ya.emit("peek", { tonumber(skip) or 0, force = true })
 end
 
 return M

@@ -22,11 +22,19 @@
 - `J`/`K` 翻页；状态栏显示 `p.N/M` 页码。
 - 只缓存页图，不复制源 PDF。
 
-### Excel 工作簿（`xlsx`）
+### PowerPoint（`pptx`、`pptm`、`ppt`、`ppsx`、`ppsm`、`pps`、`potx`、`potm`、`pot`）
+
+- 经 Microsoft PowerPoint → PDF → `pdftoppm` 渲染幻灯片图，与 Word 服务共用进程（页数 = 幻灯片数）。
+- `J`/`K` 翻页；状态栏 `p.N/M` 页码。
+- 安全：只读 + `WithWindow=False` 打开、`AutomationSecurity=3`、拒绝 `vbaProject`/ActiveX/可达外链。若你已有 PowerPoint 运行，插件仅只读附着，绝不退出你的实例。
+- 老式 `.ppt`/`.pps`/`.pot`（CFB 二进制）走同一 COM 路径。
+
+### Excel 工作簿（`xlsx`、`xls`）
 
 - 带边框的对齐表格预览，中英文宽度计算正确。
 - 真实单元格样式转 ANSI：填充色、字体色、加粗。
 - 合并单元格跨列渲染，居中保留。
+- 老式 `.xls` 经 Excel COM 一次性转换为缓存 `.xlsx`，再全保真渲染。
 - 按文件指纹缓存输出，滚动零延迟（`%LOCALAPPDATA%\yazi\preview-cache`）。
 
 ### CSV
@@ -39,19 +47,20 @@
 - 默认**渲染视图**；`F6` 在渲染/原文之间切换。
 - 标题、粗体/斜体/删除线、行内代码、链接、列表、引用块、分割线。
 - 围栏代码块保留 Pygments 语法高亮（如 `asm`、`python`、`rust`）。
-- Markdown 表格渲染为与 Word/XLSX 相同的边框网格。
-- 公式：`$...$` 与 `$$...$$` 转为 Unicode 文本（分式、根号、希腊字母、上下标）；矩阵、`\begin{}` 环境等复杂结构回退为 matplotlib 透明底 PNG。
-- PlantUML 围栏经 `plantuml.jar -utxt` 渲染为 **Unicode 文本图**；utxt 无法表达的图类型回退为透明底 PNG。
-- Mermaid `flowchart`/`graph`/`sequenceDiagram` 渲染为文本（箭头、标签、注释）；其他图类型在装有 `mmdc` 时回退为 PNG。
-- 图片（`![alt](path)`，相对路径按文档目录解析）滚动到对应行时在预览区显示；远程 URL 显示占位符。
+- Markdown 表格渲染为带行分隔线的边框网格；超出面板宽度的表格自动回退为逐记录布局，不破坏排版。
+- 公式：`$...$` 与 `$$...$$` 转为 Unicode 文本（分式、根号、希腊字母、上下标）；矩阵、`\begin{}` 环境等复杂结构以图片形式**内联渲染在文字流中**（半块真彩色，随文档滚动）。
+- PlantUML 围栏经 `plantuml.jar -utxt` 渲染为 **Unicode 文本图**；utxt 无法表达的图类型回退为透明底 PNG 内联图。
+- Mermaid `flowchart`/`graph`/`sequenceDiagram` 经 `mmdc`（Puppeteer/Chromium）渲染为内联图片；未装 `mmdc` 时回退为文本箭头渲染。
+- 图片（`![alt](path)`，相对路径按文档目录解析）以**半块真彩色文本内联渲染**——随文档滚动混排。远程 URL 显示占位符。
+- `==高亮==`、`**加粗**`、`~~删除线~~`、行内代码，以及长列表项悬挂缩进换行。
 
 ## 依赖
 
-- Windows + 已安装 Microsoft Word（Word 管线）
+- Windows + 已安装 Microsoft Word（Word 管线）；`ppt*` 需 PowerPoint；`.xls` 转换需 Excel
 - Python 3，含 `openpyxl`、`python-docx`、`pywin32`、`psutil`（`render.py`/`xlsx.py`/`table.py`/`docx_text.py`/`md.py` 通过 `python.exe` 运行）
 - [Poppler](https://github.com/oschwartz10612/poppler-windows)（`pdftoppm.exe` / `pdfinfo.exe`）
 - [Pandoc](https://pandoc.org/)（文本回退，依赖 `docx-preview.yazi` 插件）
-- 可选：Java + `plantuml.jar`（PlantUML 文本渲染）、`matplotlib`（复杂公式 PNG）、`mmdc`（Mermaid PNG 回退）、`pygments`（代码块高亮）
+- 可选：Java + `plantuml.jar`（PlantUML 文本渲染）、`matplotlib` + `pillow`（复杂公式/内联图）、`mmdc`（Mermaid 出图，`npm i -g @mermaid-js/mermaid-cli`）、`pygments`（代码块高亮）
 
 ## 安装
 
@@ -63,11 +72,11 @@ ya pkg add Mahjong404/omni-previewer.yazi
 
 ```toml
 [[plugin.prepend_previewers]]
-url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,rtf,RTF}"
+url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,dot,DOT,rtf,RTF,pptx,PPTX,pptm,PPTM,ppt,PPT,ppsx,PPSX,ppsm,PPSM,pps,PPS,potx,POTX,potm,POTM,pot,POT}"
 run = "omni-previewer"
 
 [[plugin.prepend_previewers]]
-url = "*.{xlsx,XLSX,csv,CSV,md,markdown}"
+url = "*.{xlsx,XLSX,xls,XLS,csv,CSV,md,markdown}"
 run = "omni-previewer"
 
 [[plugin.prepend_previewers]]
@@ -75,7 +84,7 @@ url = "*.{pdf,PDF}"
 run = "omni-previewer"
 
 [[plugin.prepend_preloaders]]
-url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,rtf,RTF,pdf,PDF}"
+url = "*.{docx,DOCX,doc,DOC,docm,DOCM,dotx,DOTX,dotm,DOTM,dot,DOT,rtf,RTF,pdf,PDF,pptx,PPTX,pptm,PPTM,ppt,PPT,ppsx,PPSX,ppsm,PPSM,pps,PPS,potx,POTX,potm,POTM,pot,POT}"
 run = "omni-previewer"
 ```
 
@@ -94,7 +103,6 @@ desc = "切换 Word 图文/纯文本预览"
 
 分阶段计划见 [docs/ROADMAP.md](./docs/ROADMAP.md)。
 
-- 更多格式：`pptx`、`ppt`、`xls` 快速预览
 - `.ipynb` 渲染；`.git` 仓库信息（log/status 摘要）支持
 - 归档（`zip`/`rar`）预览增强：提速 + 更丰富的列表
 - macOS/Linux 支持：Word 管线目前依赖 Windows COM，跨平台需改用 LibreOffice 无界面转换（`soffice --convert-to pdf`），表格管线本身跨平台可用

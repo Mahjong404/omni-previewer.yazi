@@ -210,6 +210,36 @@ def render_sheet(sheet, palette):
         print(DIM + f"[showing first {nrows}x{ncols} of {sheet.max_row}x{sheet.max_column}]" + RESET)
 
 
+def ensure_xlsx(path, cache):
+    """Legacy .xls (CFB binary) can't be read by openpyxl — convert it once via
+    Excel COM to a cached .xlsx, then reuse the normal pipeline."""
+    if not str(path).lower().endswith(".xls"):
+        return path
+    target = ((cache[:-5] if cache and cache.endswith(".ansi") else cache) or path + ".conv") + ".xlsx"
+    if os.path.exists(target):
+        return target
+    import pythoncom
+    import win32com.client
+
+    pythoncom.CoInitialize()
+    xl = win32com.client.DispatchEx("Excel.Application")
+    try:
+        xl.DisplayAlerts = 0
+        xl.Visible = False
+        wb = xl.Workbooks.Open(str(path), ReadOnly=True)
+        tmp = target + "." + str(os.getpid()) + ".tmp.xlsx"
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        wb.SaveAs(tmp, 51)  # xlOpenXMLWorkbook (.xlsx)
+        wb.Close(False)  # SaveAs swaps the handle to tmp; close before moving it
+        os.replace(tmp, target)
+    finally:
+        try:
+            xl.Quit()
+        finally:
+            pythoncom.CoUninitialize()
+    return target
+
+
 def prune_cache(d):
     try:
         files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".ansi")]
@@ -237,8 +267,9 @@ try:
     real = sys.stdout
     sys.stdout = buf
     try:
-        palette = theme_palette(sys.argv[1])
-        book = load_workbook(sys.argv[1], data_only=False, keep_links=False)
+        src = ensure_xlsx(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
+        palette = theme_palette(src)
+        book = load_workbook(src, data_only=False, keep_links=False)
         try:
             for i, sheet in enumerate(book.worksheets):
                 if i >= MAX_SHEETS:

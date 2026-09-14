@@ -97,6 +97,18 @@ def benign_template(target):
     return True
 
 
+OFFICE_KIND = {
+    ".docx": "word", ".doc": "word", ".docm": "word", ".dotx": "word",
+    ".dotm": "word", ".dot": "word", ".rtf": "word",
+    ".pptx": "ppt", ".pptm": "ppt", ".ppt": "ppt", ".ppsx": "ppt",
+    ".ppsm": "ppt", ".pps": "ppt", ".potx": "ppt", ".potm": "ppt", ".pot": "ppt",
+}
+
+
+def kind_of(source):
+    return OFFICE_KIND.get(source.suffix.lower())
+
+
 def validate_doc(source):
     if source.stat().st_size > 64 * 1024 * 1024:
         raise ValueError("Document exceeds the 64 MiB automatic preview limit")
@@ -105,7 +117,7 @@ def validate_doc(source):
     if magic.startswith(b"{\\rtf") or magic.startswith(b"\xd0\xcf\x11\xe0"):
         return
     if not magic.startswith(b"PK"):
-        raise ValueError("File is not a Word document")
+        raise ValueError("File is not an Office document")
     with zipfile.ZipFile(source) as archive:
         for info in archive.infolist():
             name = info.filename.lower()
@@ -165,6 +177,37 @@ def start_word():
     return app, pid, created
 
 
+def start_powerpoint():
+    """Dispatch PowerPoint COM. If the user already has PowerPoint running we
+    attach to it (read-only, invisible open) — pid is then None so the caller
+    knows not to quit it."""
+    import psutil
+    import win32com.client
+
+    previous = {p.pid for p in psutil.process_iter(["name"])
+                if (p.info["name"] or "").lower() == "powerpnt.exe"}
+    app = win32com.client.DispatchEx("PowerPoint.Application")
+    pid = created = None
+    time.sleep(0.5)
+    for p in psutil.process_iter(["name", "create_time"]):
+        if (p.info["name"] or "").lower() == "powerpnt.exe" and p.pid not in previous:
+            pid, created = p.pid, p.info["create_time"]
+    try:
+        app.AutomationSecurity = 3
+    except Exception:
+        pass
+    return app, pid, created
+
+
+def export_via_ppt(app, source, entry):
+    pres = app.Presentations.Open(str(source), ReadOnly=-1, Untitled=0, WithWindow=0)
+    try:
+        pres.SaveAs(str(entry / "document.pdf"), 32)  # ppSaveAsPDF
+        return pres.Slides.Count
+    finally:
+        pres.Close()
+
+
 def export_via_word(app, source, entry):
     document = app.Documents.Open(
         FileName=str(source), ConfirmConversions=False, ReadOnly=True,
@@ -181,19 +224,30 @@ def export_via_word(app, source, entry):
         document.Close(SaveChanges=0)
 
 
-def export_word(source, entry):
+def export_office(source, entry):
     import pythoncom
 
     pythoncom.CoInitialize()
+    kind = kind_of(source) or "word"
     app = None
+    owned = True
     try:
-        app, pid, created = start_word()
-        (entry / "owner.json").write_text(json.dumps({"pid": pid, "created": created}), encoding="utf-8")
-        print(json.dumps({"pages": export_via_word(app, source, entry)}), flush=True)
+        if kind == "ppt":
+            app, pid, created = start_powerpoint()
+            owned = pid is not None
+            pages = export_via_ppt(app, source, entry)
+        else:
+            app, pid, created = start_word()
+            pages = export_via_word(app, source, entry)
+        (entry / "owner.json").write_text(json.dumps({"pid": pid or 0, "created": created or 0}), encoding="utf-8")
+        print(json.dumps({"pages": pages}), flush=True)
     finally:
         try:
-            if app is not None:
-                app.Quit(SaveChanges=0)
+            if app is not None and owned:
+                if kind == "word":
+                    app.Quit(SaveChanges=0)
+                else:
+                    app.Quit()
         finally:
             pythoncom.CoUninitialize()
 
@@ -207,7 +261,7 @@ def cleanup_word(entry):
     identity = json.loads(owner.read_text(encoding="utf-8"))
     try:
         process = psutil.Process(identity["pid"])
-        if process.create_time() == identity["created"] and process.name().lower() == "winword.exe":
+        if process.create_time() == identity["created"] and process.name().lower() in ("winword.exe", "powerpnt.exe"):
             try:
                 process.wait(timeout=0.5)
             except psutil.TimeoutExpired:
@@ -221,7 +275,8 @@ def cleanup_word(entry):
 def kill_server_processes(identity):
     import psutil
 
-    for pid_key, create_key, name in (("server", "server_created", None), ("word", "created", "winword.exe")):
+    for pid_key, create_key, name in (("server", "server_created", None), ("word", "created", "winword.exe"),
+                                      ("ppt", "ppt_created", "powerpnt.exe")):
         try:
             process = psutil.Process(identity[pid_key])
             if process.create_time() == identity[create_key] and (not name or process.name().lower() == name):
@@ -255,7 +310,7 @@ def sweep_stale_servers():
             pass
 
 
-def export_via_server(source, entry, timeout):
+def export_via_server(source, entry, timeout, kind="word"):
     from multiprocessing.connection import Client
 
     deadline = time.monotonic() + CONNECT_TIMEOUT
@@ -276,7 +331,7 @@ def export_via_server(source, entry, timeout):
     if conn is None:
         raise TransportError("Word preview server did not start")
     try:
-        conn.send({"source": str(source), "entry": str(entry)})
+        conn.send({"source": str(source), "entry": str(entry), "kind": kind})
         if not conn.poll(timeout):
             raise TransportError("Word preview server did not respond")
         reply = conn.recv()
@@ -302,15 +357,35 @@ def serve():
     if win32api.GetLastError() == 183:
         return
     pythoncom.CoInitialize()
+    apps, owners = {}, {}
     try:
-        app, word_pid, created = start_word()
+        apps["word"], pid, created = start_word()
+        owners["word"] = (pid, created, True)
     except Exception:
         pythoncom.CoUninitialize()
         sys.exit(1)
     identity_path = CACHE / ".server.json"
     identity_path.write_text(json.dumps(
         {"server": os.getpid(), "server_created": psutil.Process().create_time(),
-         "word": word_pid, "created": created}), encoding="utf-8")
+         "word": owners["word"][0], "created": owners["word"][1]}), encoding="utf-8")
+
+    def app_for(kind):
+        if kind not in apps:
+            if kind == "ppt":
+                app, pid, created = start_powerpoint()
+            else:
+                app, pid, created = start_word()
+            apps[kind] = app
+            owners[kind] = (pid, created, kind != "ppt" or pid is not None)
+            try:
+                data = json.loads(identity_path.read_text(encoding="utf-8"))
+                data[kind] = pid or 0
+                data[kind + "_created"] = created or 0
+                identity_path.write_text(json.dumps(data), encoding="utf-8")
+            except Exception:
+                pass
+        return apps[kind]
+        return apps[kind]
     stop = threading.Event()
     last_request = [time.time()]
     listener = Listener(PIPE_NAME, family="AF_PIPE")
@@ -336,7 +411,12 @@ def serve():
             try:
                 request = conn.recv()
                 last_request[0] = time.time()
-                pages = export_via_word(app, Path(request["source"]), Path(request["entry"]))
+                kind = request.get("kind", "word")
+                app = app_for(kind)
+                if kind == "ppt":
+                    pages = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
+                else:
+                    pages = export_via_word(app, Path(request["source"]), Path(request["entry"]))
                 conn.send({"ok": True, "pages": pages})
             except Exception as exc:
                 try:
@@ -346,10 +426,15 @@ def serve():
             finally:
                 conn.close()
     finally:
-        try:
-            app.Quit(SaveChanges=0)
-        except Exception:
-            pass
+        for kind, app in apps.items():
+            try:
+                if owners.get(kind, (None, None, False))[2]:
+                    if kind == "word":
+                        app.Quit(SaveChanges=0)
+                    else:
+                        app.Quit()
+            except Exception:
+                pass
         pythoncom.CoUninitialize()
         identity_path.unlink(missing_ok=True)
 
@@ -393,12 +478,13 @@ def convert_to_pdf(source, entry, stat):
     (soffice --headless --convert-to pdf) slots in here for other platforms.
     Returns the {"pages": n} metadata dict."""
     validate_doc(source)
+    kind = kind_of(source) or "word"
     timeout = max(30, min(120, stat.st_size // (2 * 1024 * 1024) + 15))
     try:
-        return export_via_server(source, entry, timeout)
+        return export_via_server(source, entry, timeout, kind)
     except TransportError:
         try:
-            return export_via_server(source, entry, timeout)
+            return export_via_server(source, entry, timeout, kind)
         except TransportError:
             try:
                 result = subprocess.run(
@@ -490,7 +576,7 @@ if __name__ == "__main__":
     try:
         args = sys.argv[1:]
         if args[0] == "--export":
-            export_word(Path(args[1]), Path(args[2]))
+            export_office(Path(args[1]), Path(args[2]))
         elif args[0] == "--serve":
             serve()
         else:

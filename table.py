@@ -65,21 +65,22 @@ def wrap_cell(text, w):
     return [l + " " * max(0, w - width(l)) for l in lines] or [""]
 
 
-def grid_lines(rows, header=None, max_width=0):
+def grid_lines(rows, header=None, max_width=0, rowsep=False):
     """rows: list of (cells, spans) — cells: list[str], spans: list[int].
     Plain text grid with box-drawing borders; cells wrap instead of truncating;
-    header=True renders row 0 bold with a divider. max_width caps total width."""
+    header=True renders row 0 bold with a divider. max_width caps total width.
+    rowsep=True draws a separator between data rows."""
     buf = io.StringIO()
     real = sys.stdout
     sys.stdout = buf
     try:
-        _grid_body(rows, header, max_width)
+        _grid_body(rows, header, max_width, rowsep)
     finally:
         sys.stdout = real
     return buf.getvalue()
 
 
-def _grid_body(rows, header=None, max_width=0):
+def _grid_body(rows, header=None, max_width=0, rowsep=False):
     rows = [(cells, spans) for cells, spans in rows if any(cells)]
     while rows and not any(rows[-1][0]):
         rows.pop()
@@ -126,6 +127,8 @@ def _grid_body(rows, header=None, max_width=0):
                 out += " " + body + " " + DIM + "│" + RESET
             print(out)
         if header and ri == 0:
+            border("├", "┼", "┤")
+        elif rowsep and ri < len(rows) - 1:
             border("├", "┼", "┤")
     border("└", "┴", "┘")
 

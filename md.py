@@ -4,14 +4,73 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import table
 
 DIM, RESET, BOLD, ITAL, UND = "\x1b[90m", "\x1b[0m", "\x1b[1m", "\x1b[3m", "\x1b[4m"
-CYAN, CODE, STRIKE = "\x1b[36m", "\x1b[48;5;236m", "\x1b[9m"
+CYAN, STRIKE = "\x1b[36m", "\x1b[9m"
+BOLD_TXT = "\x1b[1;97m"
+CODE = "\x1b[48;5;238m\x1b[38;5;222m"
+HL = "\x1b[30;103m"
 MAX_LINES = 2000
 PLANTUML_JAR = r"C:\software\CLI\plantuml\plantuml.jar"
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+IMG_BG = (30, 30, 46)  # dark composite for transparent images
+
+
+def _disp_w(ch):
+    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+
+
+def ansi_image(path, max_w, max_h=160):
+    """Render an image as half-block truecolor text lines (scrolls with text)."""
+    try:
+        from PIL import Image
+        img = Image.open(path).convert("RGBA")
+        bg = Image.new("RGBA", img.size, IMG_BG + (255,))
+        img = Image.alpha_composite(bg, img).convert("RGB")
+        w = max(8, min(max_w or 80, img.width))
+        h = max(2, round(img.height * w / img.width))
+        if h > max_h:
+            h = max_h
+            w = max(8, round(img.width * h / img.height))
+        img = img.resize((w, h - h % 2), Image.LANCZOS)
+        px = img.load()
+        lines = []
+        for y in range(0, img.height, 2):
+            parts = []
+            for x in range(img.width):
+                r1, g1, b1 = px[x, y]
+                r2, g2, b2 = px[x, y + 1]
+                parts.append("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀" % (r1, g1, b1, r2, g2, b2))
+            lines.append("".join(parts) + RESET)
+        return lines
+    except Exception:
+        return None
+
+
+def wrap_ansi(s, width):
+    """Wrap an ANSI-styled line at display width; returns list of lines."""
+    if width <= 0 or table.width(s) <= width:
+        return [s]
+    lines, cur, w, i = [], "", 0, 0
+    while i < len(s):
+        m = ANSI_RE.match(s, i)
+        if m:
+            cur += m.group(0)
+            i = m.end()
+            continue
+        cw = _disp_w(s[i])
+        if w + cw > width:
+            lines.append(cur)
+            cur, w = "", 0
+        cur += s[i]
+        w += cw
+        i += 1
+    lines.append(cur)
+    return lines
 
 GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "zeta": "ζ",
          "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ",
@@ -265,14 +324,15 @@ def render_inline(s):
     s = re.sub(r"\$([^$\n]+)\$", lambda m: keep(ITAL + math_unicode(m.group(1)) + RESET), s)
     s = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", lambda m: keep(DIM + "[image: " + (m.group(1) or m.group(2)) + "]" + RESET), s)
     s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", lambda m: keep(UND + CYAN + m.group(1) + RESET + DIM + "(" + m.group(2) + ")" + RESET), s)
-    s = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: keep(BOLD + (m.group(1) or m.group(2)) + RESET), s)
+    s = re.sub(r"==([^=]+)==", lambda m: keep(HL + " " + m.group(1) + " " + RESET), s)
+    s = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: keep(BOLD_TXT + (m.group(1) or m.group(2)) + RESET), s)
     s = re.sub(r"~~([^~]+)~~", lambda m: keep(STRIKE + m.group(1) + RESET), s)
     s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])|(?<![\w_])_([^_\n]+)_(?![\w_])",
                lambda m: keep(ITAL + (m.group(1) or m.group(2)) + RESET), s)
     return re.sub(re.escape("\x00") + r"(\d+)" + re.escape("\x00"), lambda m: spans[int(m.group(1))], s)
 
 
-def parse_table(lines, i):
+def parse_table(lines, i, max_width=0):
     j = i
     block = []
     while j < len(lines) and lines[j].strip().startswith("|"):
@@ -286,11 +346,28 @@ def parse_table(lines, i):
         return [re.sub(r"\\([\[\]|])", r"\1", c).strip() for c in inner.split("|")]
 
     header = [render_inline(c) for c in cells_of(block[0])]
-    grid = [(header, [1] * len(header))]
-    for b in block[2:]:
-        cells = [render_inline(c) for c in cells_of(b)]
-        grid.append((cells, [1] * len(cells)))
-    return table.grid_lines(grid, header=True).splitlines(), j
+    data = [[render_inline(c) for c in cells_of(b)] for b in block[2:]]
+    ncols = len(header)
+    natural = [0] * ncols
+    for r in [header] + data:
+        for c in range(min(ncols, len(r))):
+            natural[c] = max(natural[c], table.width(r[c]))
+    min_grid = sum(min(w, table.CELL_MAX) for w in natural) + 3 * ncols + 1
+    if max_width and min_grid > max_width:
+        out = []
+        for r_i, row in enumerate(data):
+            out.append(DIM + "─" * 6 + RESET + " " + BOLD_TXT + "#" + str(r_i + 1) + RESET)
+            for c in range(ncols):
+                label = ANSI_RE.sub("", header[c])
+                val = row[c] if c < len(row) else ""
+                room = max(10, (max_width or 60) - table.width(label) - 5)
+                for ln, wl in enumerate(wrap_ansi(val, room)):
+                    tag = "  " + CYAN + label + RESET + ": " if ln == 0 else " " * (table.width(label) + 5)
+                    out.append(tag + wl)
+        return out, j
+    grid = [(header, [1] * ncols)]
+    grid += [(r, [1] * len(r)) for r in data]
+    return table.grid_lines(grid, header=True, max_width=max_width, rowsep=True).splitlines(), j
 
 
 def render(md_path, cache_base, max_width=0):
@@ -326,15 +403,17 @@ def render(md_path, cache_base, max_width=0):
             if not lang and "@start" in src:
                 lang = "plantuml"
             if lang == "mermaid":
-                txt = mermaid_text(src)
-                if txt:
+                media_i += 1
+                png = cache_base + f"-m{media_i}.png"
+                img = ansi_image(png, max_width or 80) if mmdc_png(src, png) else None
+                if img:
                     out.append(DIM + "◆ mermaid" + RESET)
-                    out.extend(txt)
+                    out.extend(img)
                 else:
-                    media_i += 1
-                    png = cache_base + f"-m{media_i}.png"
-                    if mmdc_png(src, png):
-                        add_media(png, lang, "mermaid diagram")
+                    txt = mermaid_text(src)
+                    if txt:
+                        out.append(DIM + "◆ mermaid" + RESET)
+                        out.extend(txt)
                     else:
                         out.append(DIM + "[mermaid diagram — renderer unavailable]" + RESET)
                         out.extend(DIM + "│ " + RESET + l for l in highlight(src, "mermaid"))
@@ -346,8 +425,10 @@ def render(md_path, cache_base, max_width=0):
                     out.extend(txt)
                 else:
                     png = cache_base + f"-m{media_i}.png"
-                    if plantuml_png(src, png):
-                        add_media(png, lang, "plantuml diagram")
+                    img = ansi_image(png, max_width or 80) if plantuml_png(src, png) else None
+                    if img:
+                        out.append(DIM + "◆ plantuml" + RESET)
+                        out.extend(img)
                     else:
                         out.append(DIM + "[plantuml diagram — renderer unavailable]" + RESET)
                         out.extend(DIM + "│ " + RESET + l for l in highlight(src, "java"))
@@ -372,14 +453,15 @@ def render(md_path, cache_base, max_width=0):
             elif latex:
                 media_i += 1
                 png = cache_base + f"-m{media_i}.png"
-                if math_png(latex, png):
-                    add_media(png, "math", "formula")
+                img = ansi_image(png, max_width or 80) if math_png(latex, png) else None
+                if img:
+                    out.extend(img)
                 else:
                     out.append("    " + ITAL + (uni or latex) + RESET)
             i = j + 1
             continue
         if st.startswith("|") and "|" in st[1:]:
-            tbl, ni = parse_table(lines, i)
+            tbl, ni = parse_table(lines, i, max_width)
             if tbl:
                 out.extend(tbl)
                 i = ni
@@ -391,7 +473,12 @@ def render(md_path, cache_base, max_width=0):
                 out.append(DIM + f"[image: {target}]" + RESET)
             else:
                 p = target if os.path.isabs(target) else os.path.join(base, target.replace("/", os.sep))
-                if os.path.exists(p):
+                img = ansi_image(p, max_width or 80) if os.path.exists(p) else None
+                if img:
+                    if mimg.group(1):
+                        out.append(DIM + "▦ " + mimg.group(1) + RESET)
+                    out.extend(img)
+                elif os.path.exists(p):
                     add_media(p, "image", mimg.group(1) or os.path.basename(p))
                 else:
                     out.append(DIM + f"[image missing: {target}]" + RESET)
@@ -416,7 +503,11 @@ def render(md_path, cache_base, max_width=0):
             continue
         lm = re.match(r"^(\s*)([-*+]|\d+\.)\s+(.*)$", line)
         if lm:
-            out.append(lm.group(1) + CYAN + lm.group(2) + RESET + " " + render_inline(lm.group(3)))
+            hang_w = len(lm.group(1)) + len(lm.group(2)) + 1
+            body = render_inline(lm.group(3))
+            wl = wrap_ansi(body, max(10, (max_width or 80) - hang_w))
+            out.append(lm.group(1) + CYAN + lm.group(2) + RESET + " " + wl[0])
+            out.extend(" " * hang_w + l for l in wl[1:])
             i += 1
             continue
         out.append(render_inline(line) if st else "")
