@@ -451,6 +451,33 @@ def pdf_pages(source):
     return int(m.group(1))
 
 
+def render_all_pages(entry, edge, pdf, pages):
+    missing = [p for p in range(pages)
+               if not (entry / f"page-{p}-{edge}.jpg").exists()]
+    if not missing:
+        return
+    prefix = entry / f"batch-{os.getpid()}"
+    result = subprocess.run(
+        [PDFTOPPM, "-scale-to", str(edge), "-jpeg", "-jpegopt", "quality=75",
+         str(pdf), str(prefix)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=max(60, pages * 3), creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    produced = list(entry.glob(prefix.name + "-*.jpg"))
+    for f in produced:
+        try:
+            n = int(f.stem.rsplit("-", 1)[1])
+        except ValueError:
+            f.unlink(missing_ok=True)
+            continue
+        if 1 <= n <= pages:
+            os.replace(f, entry / f"page-{n - 1}-{edge}.jpg")
+        else:
+            f.unlink(missing_ok=True)
+    if result.returncode and not produced:
+        raise RuntimeError("PDF batch rendering failed: " + result.stderr.strip()[-500:])
+
+
 def render_page(entry, page, edge, pdf):
     image = entry / f"page-{page}-{edge}.jpg"
     if image.exists():
@@ -537,6 +564,11 @@ def render(source, page, edge, probe=False):
                 pass
             pdf = source if is_pdf else entry / "document.pdf"
             page = max(0, min(page, metadata["pages"] - 1))
+            if not probe and metadata["pages"] <= 60:
+                try:
+                    render_all_pages(entry, edge, pdf, metadata["pages"])
+                except Exception:
+                    pass
             targets = {page, page + 1} | ({0, 1, 2} if converted else set())
             for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
                 try:
@@ -546,7 +578,7 @@ def render(source, page, edge, probe=False):
             image = render_page(entry, page, edge, pdf)
             os.utime(image, None)
             pages = sorted(entry.glob("page-*.jpg"), key=lambda f: f.stat().st_mtime, reverse=True)
-            for obsolete in pages[3:]:
+            for obsolete in pages[50:]:
                 obsolete.unlink()
             os.utime(entry, None)
             prune(entry)

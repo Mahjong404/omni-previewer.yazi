@@ -47,11 +47,11 @@
 - 默认**渲染视图**；`F6` 在渲染/原文之间切换。
 - 标题、粗体/斜体/删除线、行内代码、链接、列表、引用块、分割线。
 - 围栏代码块保留 Pygments 语法高亮（如 `asm`、`python`、`rust`）。
-- Markdown 表格渲染为带行分隔线的边框网格；超出面板宽度的表格自动回退为逐记录布局，不破坏排版。
-- 公式：`$...$` 与 `$$...$$` 转为 Unicode 文本（分式、根号、希腊字母、上下标）；矩阵、`\begin{}` 环境等复杂结构以图片形式**内联渲染在文字流中**（半块真彩色，随文档滚动）。
+- Markdown 表格渲染为带行分隔线的边框网格；放不下的右侧列自动丢弃（附提示），不破坏排版。
+- 公式：`$...$` 与 `$$...$$` 转为 Unicode 文本（分式、根号、希腊字母、上下标）；矩阵、`\begin{}` 环境等复杂结构经**真 LaTeX → dvipng** 排版（或 matplotlib 回退），以图片形式内联显示在文字流中的对应位置。
 - PlantUML 围栏经 `plantuml.jar -utxt` 渲染为 **Unicode 文本图**；utxt 无法表达的图类型回退为透明底 PNG 内联图。
 - Mermaid `flowchart`/`graph`/`sequenceDiagram` 经 `mmdc`（Puppeteer/Chromium）渲染为内联图片；未装 `mmdc` 时回退为文本箭头渲染。
-- 图片（`![alt](path)`，相对路径按文档目录解析）以**半块真彩色文本内联渲染**——随文档滚动混排。远程 URL 显示占位符。
+- 图片（`![alt](path)`，相对路径按文档目录解析）、Mermaid/PlantUML 图片与渲染公式以真实图像**叠加显示在其所在行位置**——文字与图片一起滚动。远程 URL 显示占位符。
 - `==高亮==`、`**加粗**`、`~~删除线~~`、行内代码，以及长列表项悬挂缩进换行。
 
 ## 依赖
@@ -60,7 +60,7 @@
 - Python 3，含 `openpyxl`、`python-docx`、`pywin32`、`psutil`（`render.py`/`xlsx.py`/`table.py`/`docx_text.py`/`md.py` 通过 `python.exe` 运行）
 - [Poppler](https://github.com/oschwartz10612/poppler-windows)（`pdftoppm.exe` / `pdfinfo.exe`）
 - [Pandoc](https://pandoc.org/)（文本回退，依赖 `docx-preview.yazi` 插件）
-- 可选：Java + `plantuml.jar`（PlantUML 文本渲染）、`matplotlib` + `pillow`（复杂公式/内联图）、`mmdc`（Mermaid 出图，`npm i -g @mermaid-js/mermaid-cli`）、`pygments`（代码块高亮）
+- 可选：Java + `plantuml.jar`（PlantUML 文本渲染）、LaTeX + `dvipng` 或 `matplotlib`（复杂公式）、`mmdc`（Mermaid 出图，`npm i -g @mermaid-js/mermaid-cli`）、`pygments`（代码块高亮）
 
 ## 安装
 

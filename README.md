@@ -47,11 +47,11 @@ All-in-one document previewer for [Yazi](https://github.com/sxyazi/yazi), focuse
 - **Rendered view** by default; `F6` toggles rendered / raw source.
 - Headings, bold/italic/strikethrough, inline code, links, lists, block quotes, horizontal rules.
 - Fenced code blocks keep full Pygments syntax highlighting (e.g. `asm`, `python`, `rust`).
-- Markdown tables render as bordered grids with row separators; tables too wide for the pane fall back to a per-record layout instead of breaking.
-- Math: `$...$` and `$$...$$` are converted to Unicode text (fractions, roots, Greek letters, super/subscripts); complex constructs (matrices, `\begin{...}` environments, etc.) render as images **inline with the text** (half-block truecolor, scrolls naturally).
+- Markdown tables render as bordered grids with row separators; columns that can't fit the pane width are dropped (with a note) instead of breaking the layout.
+- Math: `$...$` and `$$...$$` are converted to Unicode text (fractions, roots, Greek letters, super/subscripts); complex constructs (matrices, `\begin{...}` environments, etc.) are typeset by **real LaTeX → dvipng** (or matplotlib fallback) and shown inline, at their position in the text flow.
 - PlantUML fences render as **Unicode text diagrams** via `plantuml.jar -utxt` (transparent-PNG → inline-image fallback for diagram types utxt cannot express).
 - Mermaid `flowchart`/`graph`/`sequenceDiagram` render via `mmdc` (Puppeteer/Chromium) as inline images; without `mmdc` they fall back to a text arrow rendering.
-- Images (`![alt](path)`, relative paths resolved against the document) render **inline as half-block truecolor text** — they scroll with the document. Remote URLs show a placeholder.
+- Images (`![alt](path)`, relative paths resolved against the document), Mermaid/PlantUML pictures and rendered formulas display as real images **overlaid at their line position** — text and images scroll together. Remote URLs show a placeholder.
 - `==highlight==`, `**bold**`, `~~strike~~`, inline code, and list items with hanging-indent wrapping.
 
 ## Requirements
@@ -60,7 +60,7 @@ All-in-one document previewer for [Yazi](https://github.com/sxyazi/yazi), focuse
 - Python 3 with `openpyxl`, `python-docx`, `pywin32`, `psutil` (`render.py`/`xlsx.py`/`table.py`/`docx_text.py`/`md.py` run via `python.exe`)
 - [Poppler](https://github.com/oschwartz10612/poppler-windows) (`pdftoppm.exe`)
 - [Pandoc](https://pandoc.org/) (text fallback, via the `docx-preview.yazi` plugin)
-- Optional: Java + `plantuml.jar` (PlantUML text rendering), `matplotlib` + `pillow` (complex math / inline images), `mmdc` (Mermaid diagram PNG, `npm i -g @mermaid-js/mermaid-cli`), `pygments` (code-block highlighting)
+- Optional: Java + `plantuml.jar` (PlantUML text rendering), LaTeX + `dvipng` or `matplotlib` (complex math), `mmdc` (Mermaid diagram PNG, `npm i -g @mermaid-js/mermaid-cli`), `pygments` (code-block highlighting)
 
 ## Installation
 

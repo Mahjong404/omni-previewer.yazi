@@ -54,7 +54,11 @@ local toggle = ya.sync(function(state)
 	state.text_mode = not state.text_mode
 	state.failed = {}
 	state.pending = {}
-	return state.text_mode, cx.active.preview.skip
+	local skip = 0
+	pcall(function()
+		skip = cx.active.preview.skip or 0
+	end)
+	return state.text_mode, skip
 end)
 
 local function identity(job)
@@ -69,15 +73,27 @@ local function show_image(job, image, page)
 	ya.preview_widget(job, err)
 end
 
-local function ansi_peek(job, text)
-	local lines = ui.lines(text, { ansi = true, tab_size = rt.preview.tab_size, width = job.area.w, wrap = ui.Wrap.YES })
+local function ansi_lines(job, text, nowrap)
+	return ui.lines(text, { ansi = true, tab_size = rt.preview.tab_size, width = job.area.w,
+		wrap = nowrap and ui.Wrap.NO or ui.Wrap.YES })
+end
+
+local function ansi_page(job, lines)
 	local limit = job.area.h
 	if job.skip > 0 and job.skip >= #lines then
-		return ya.emit("peek", { math.max(0, #lines - limit), only_if = job.file.url, upper_bound = true })
+		return nil, math.max(0, #lines - limit)
 	end
 	local page = {}
 	for i = job.skip + 1, math.min(#lines, job.skip + limit) do
 		page[#page + 1] = lines[i]
+	end
+	return page
+end
+
+local function ansi_peek(job, text)
+	local page, reskip = ansi_page(job, ansi_lines(job, text))
+	if page == nil then
+		return ya.emit("peek", { reskip, only_if = job.file.url, upper_bound = true })
 	end
 	ya.preview_widget(job, ui.Text(page):area(job.area))
 end
@@ -89,8 +105,9 @@ local function text_cache(job)
 	for i = 1, #url do
 		h = (h * 33 + url:byte(i)) % 4294967296
 	end
-	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x.ansi",
-		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0))
+	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d.ansi",
+		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0),
+		job.area.w, job.area.h)
 end
 
 local function read_file(path)
@@ -113,7 +130,7 @@ local function script_peek(job, script)
 	local text = read_file(cache)
 	if text == nil then
 		local output = Command(PYTHON)
-			:arg({ "-X", "utf8", plugin_file(script), tostring(job.file.path), cache, tostring(job.area.w) })
+			:arg({ "-X", "utf8", plugin_file(script), tostring(job.file.path), cache, tostring(job.area.w), tostring(job.area.h) })
 			:output()
 		if not output or not output.status.success then
 			return nil
@@ -184,11 +201,13 @@ end
 
 local function word_seek(job)
 	local text_mode, failed = state_get(identity(job))
-	if text_mode or failed then
-		return require("docx-preview"):seek(job)
-	end
 	local hovered = cx.active.current.hovered
-	if hovered and hovered.url == job.file.url then
+	if not (hovered and hovered.url == job.file.url) then
+		return
+	end
+	if text_mode or failed then
+		ya.emit("peek", { math.max(0, cx.active.preview.skip + job.units), only_if = job.file.url })
+	else
 		ya.emit("peek", { math.max(0, cx.active.preview.skip + ya.clamp(-1, job.units, 1)), only_if = job.file.url })
 	end
 end
@@ -222,15 +241,24 @@ local function md_peek(job)
 	if type(manifest) ~= "table" or not manifest.text then
 		return ansi_peek(job, raw)
 	end
+	-- Text is pre-wrapped to pane width by md.py, so manifest line numbers map
+	-- 1:1 to screen rows: overlay each media image into its placeholder sub-rect.
+	local lines = ansi_lines(job, manifest.text, true)
+	local page, reskip = ansi_page(job, lines)
+	if page == nil then
+		return ya.emit("peek", { reskip, only_if = job.file.url, upper_bound = true })
+	end
+	ya.preview_widget(job, ui.Text(page):area(job.area))
 	local limit = job.area.h
 	for _, m in ipairs(manifest.media or {}) do
-		local ln = tonumber(m.line) or -1
-		if m.path and ln > job.skip and ln <= job.skip + math.max(1, math.floor(limit / 2)) then
-			local _, err = ya.image_show(Url(m.path), job.area)
-			return ya.preview_widget(job, err)
+		local top, h = tonumber(m.line) or -1, tonumber(m.lines) or 0
+		if m.path and top >= job.skip and top + h <= job.skip + limit and h >= 2 then
+			ya.image_show(Url(m.path), ui.Rect {
+				x = job.area.x, y = job.area.y + top - job.skip,
+				w = job.area.w, h = h,
+			})
 		end
 	end
-	ansi_peek(job, manifest.text)
 end
 
 -- ==================== Dispatch ====================
@@ -259,8 +287,12 @@ function M:preload(job)
 	if not file or not PAGE_EXTS[ext_of(file.url)] then
 		return true
 	end
+	local ok, edge = pcall(function()
+		return math.max(600, math.min(3200, math.max(rt.preview.max_width, rt.preview.max_height) * 16))
+	end)
 	Command(PYTHON)
-		:arg({ "-X", "utf8", plugin_file("render.py"), tostring(file.path or file.url), "0", "2000", "--notify", tostring(file.url) })
+		:arg({ "-X", "utf8", plugin_file("render.py"), tostring(file.path or file.url), "0",
+			tostring(ok and edge or 2000), "--notify", tostring(file.url) })
 		:output()
 	return true
 end
