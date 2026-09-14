@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from xml.etree import ElementTree
 
 CACHE = Path(os.environ["LOCALAPPDATA"]) / "yazi/docx-pages"
-LIMIT = 128 * 1024 * 1024
+LIMIT = 64 * 1024 * 1024
 MAX_AGE = 3 * 86400
 TIMEOUT = 30
 PROBE_TIMEOUT = 0.8
@@ -78,7 +78,7 @@ def prune(current):
             shutil.rmtree(entry)
             total -= size
     if total > LIMIT:
-        raise ValueError("This document exceeds the 128 MiB preview cache limit")
+        raise ValueError("This document exceeds the 64 MiB preview cache limit")
 
 
 def benign_template(target):

@@ -1,8 +1,16 @@
 # omni-previewer.yazi
 
+**English** | [简体中文](./README.zh-CN.md)
+
 All-in-one document previewer for [Yazi](https://github.com/sxyazi/yazi), focused on Windows + Office formats.
 
 ## Features
+
+### PDF
+
+- Direct `pdftoppm` rendering scaled to the preview pane — oversized pages (e.g. giant mind-map exports) no longer hit the image-size limit.
+- `J`/`K` page navigation; status-bar page indicator shows `p.N/M`.
+- Page-image cache only (the source PDF is never duplicated).
 
 ### Word documents (`docx`, `doc`, `docm`, `dotx`, `dotm`, `rtf`)
 
@@ -11,7 +19,7 @@ All-in-one document previewer for [Yazi](https://github.com/sxyazi/yazi), focuse
 - `J`/`K` page navigation, `F6` toggle between page-image and text mode.
 - A hidden, reusable Word automation service keeps warm-document conversion fast (~0.5 s) and exits after 10 minutes idle.
 - Safety: read-only open, macros force-disabled (`AutomationSecurity=3`), ActiveX/`vbaProject`/reachable external links rejected, existing Word sessions are never touched.
-- Bounded cache (`%LOCALAPPDATA%\yazi\docx-pages`): 128 MiB total, ≤3 page images per document, entries older than 3 days pruned.
+- Bounded cache (`%LOCALAPPDATA%\yazi\docx-pages`): 64 MiB total, ≤3 page images per document, entries older than 3 days pruned.
 
 ### Excel workbooks (`xlsx`)
 
@@ -64,8 +72,8 @@ Adjust the `PYTHON` constant at the top of `main.lua` to your interpreter.
 
 - More formats: `pptx`, `ppt`, `xls`, `csv`, `md` quick previews
 - `.ipynb` notebook rendering; `.git` repo info (log/status summary) support
-- PDF preview enhancements: faster first paint, richer page features
 - Archive (`zip`/`rar`) preview enhancements: speed + richer listing
+- macOS/Linux support: the Word pipeline currently relies on Windows COM; a cross-platform port would use headless LibreOffice (`soffice --convert-to pdf`). The XLSX pipeline is already portable.
 - `docx-preview` fallback independence (inline text extraction)
 
 ## License
