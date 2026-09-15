@@ -118,7 +118,7 @@ local function text_cache(job)
 	for i = 1, #url do
 		h = (h * 33 + url:byte(i)) % 4294967296
 	end
-	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d.ansi",
+	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v5.ansi",
 		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0),
 		job.area.w, job.area.h)
 end
@@ -197,7 +197,7 @@ local function word_peek(job)
 		return word_probe(job, key, edge)
 	end
 	if pending then
-		return word_probe(job, key, edge)
+		return word_fallback(job)
 	end
 
 	local output = Command(PYTHON)
@@ -214,12 +214,14 @@ local function word_peek(job)
 end
 
 local function word_seek(job)
-	local text_mode, failed = state_get(identity(job))
+	local text_mode, failed, info, pending = state_get(identity(job))
 	local hovered = cx.active.current.hovered
 	if not (hovered and hovered.url == job.file.url) then
 		return
 	end
-	if text_mode or failed then
+	-- Line-unit scrolling when showing text (text mode, failure, or the
+	-- fallback shown while conversion is pending); page-unit otherwise.
+	if text_mode or failed or (not info and pending) then
 		ya.emit("peek", { math.max(0, cx.active.preview.skip + job.units), only_if = job.file.url })
 	else
 		ya.emit("peek", { math.max(0, cx.active.preview.skip + ya.clamp(-1, job.units, 1)), only_if = job.file.url })

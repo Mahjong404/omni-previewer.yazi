@@ -68,7 +68,7 @@ def media_path(cache_base, kind, src, ext=".png"):
     """Content-hashed media cache so re-renders/edits reuse generated assets."""
     d = os.path.join(os.path.dirname(cache_base) or ".", "md-media")
     os.makedirs(d, exist_ok=True)
-    h = hashlib.sha256((kind + "\n" + src).encode("utf-8")).hexdigest()[:20]
+    h = hashlib.sha256(("v2\n" + kind + "\n" + src).encode("utf-8")).hexdigest()[:20]
     return os.path.join(d, h + ext)
 
 

@@ -530,14 +530,15 @@ def convert_to_pdf(source, entry, stat):
     return metadata
 
 
-def render(source, page, edge, probe=False):
+def render(source, page, edge, probe=False, lock_timeout=None):
     source = source.resolve(strict=True)
     stat = source.stat()
     identity = f"{str(source).casefold()}\0{stat.st_size}\0{stat.st_mtime_ns}"
     key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     entry = CACHE / key
     edge = max(200, min(3200, edge))
-    with cache_lock(PROBE_TIMEOUT if probe else TIMEOUT):
+    wait = PROBE_TIMEOUT if probe else (lock_timeout if lock_timeout is not None else TIMEOUT)
+    with cache_lock(wait):
         prune(entry)
         sweep_stale_servers()
         try:
@@ -609,7 +610,10 @@ if __name__ == "__main__":
         else:
             probe = "--probe" in args
             url = args[args.index("--notify") + 1] if "--notify" in args else None
-            result = render(Path(args[0]), int(args[1]), int(args[2]), probe=probe)
+            # Preloads must not queue behind a running conversion: the in-flight
+            # worker will emit its own refresh when it finishes.
+            result = render(Path(args[0]), int(args[1]), int(args[2]), probe=probe,
+                            lock_timeout=2 if url else None)
             print(json.dumps(result), flush=True)
             if url:
                 notify(url, result["page"])
