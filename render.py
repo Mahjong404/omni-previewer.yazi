@@ -160,6 +160,7 @@ def start_word():
         if pid in previous or process.name().lower() != "winword.exe":
             raise RuntimeError("Word did not provide an isolated process; existing Word sessions were left untouched")
         created = process.create_time()
+        register_owned("winword", pid, created)
         app.Visible = False
         app.DisplayAlerts = 0
         app.AutomationSecurity = 3
@@ -192,6 +193,7 @@ def start_powerpoint():
     for p in psutil.process_iter(["name", "create_time"]):
         if (p.info["name"] or "").lower() == "powerpnt.exe" and p.pid not in previous:
             pid, created = p.pid, p.info["create_time"]
+    register_owned("powerpnt", pid, created)
     try:
         app.AutomationSecurity = 3
     except Exception:
@@ -302,10 +304,29 @@ def cleanup_word(entry):
     owner.unlink(missing_ok=True)
 
 
+def register_owned(name, pid, created):
+    """Ledger entry for an Office process we spawned: .owned-{name}-{pid}-{created}
+    holding the spawning python pid. sweep_stale_servers() kills any such app
+    whose owner python is gone - covers hard-killed servers/exports where the
+    graceful Quit in finally never ran."""
+    if not pid:
+        return
+    try:
+        import psutil
+
+        marker = CACHE / f".owned-{name}-{pid}-{created}"
+        tmp = marker.with_name(marker.name + ".tmp")
+        tmp.write_text(json.dumps({"owner": os.getpid(),
+                                   "owner_created": psutil.Process().create_time()}), encoding="utf-8")
+        os.replace(tmp, marker)
+    except Exception:
+        pass
+
+
 def kill_server_processes(identity):
     import psutil
 
-    for pid_key, create_key, name in (("server", "server_created", None), ("word", "created", "winword.exe"),
+    for pid_key, create_key, name in (("server", "server_created", None), ("word", "word_created", "winword.exe"),
                                       ("ppt", "ppt_created", "powerpnt.exe")):
         try:
             process = psutil.Process(identity[pid_key])
@@ -336,6 +357,25 @@ def sweep_stale_servers():
             if not psutil.pid_exists(int(legacy.stem.rsplit("-", 1)[1])):
                 kill_server_processes(json.loads(legacy.read_text(encoding="utf-8")))
                 legacy.unlink(missing_ok=True)
+        except Exception:
+            pass
+    for marker in CACHE.glob(".owned-*"):
+        try:
+            name, pid_s, created_s = marker.name[7:].rsplit("-", 2)
+            pid, created = int(pid_s), float(created_s)
+            owner = json.loads(marker.read_text(encoding="utf-8"))
+            owner_alive = psutil.pid_exists(owner["owner"]) and \
+                psutil.Process(owner["owner"]).create_time() == owner["owner_created"]
+            try:
+                proc = psutil.Process(pid)
+                alive = proc.create_time() == created and proc.name().lower() == name + ".exe"
+            except psutil.NoSuchProcess:
+                alive = False
+            if alive and not owner_alive:
+                proc.kill()
+                alive = False
+            if not alive:
+                marker.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -397,7 +437,7 @@ def serve():
     identity_path = CACHE / ".server.json"
     identity_path.write_text(json.dumps(
         {"server": os.getpid(), "server_created": psutil.Process().create_time(),
-         "word": owners["word"][0], "created": owners["word"][1]}), encoding="utf-8")
+         "word": owners["word"][0], "word_created": owners["word"][1]}), encoding="utf-8")
 
     def app_for(kind):
         if kind not in apps:
@@ -438,15 +478,28 @@ def serve():
                 conn = listener.accept()
             except OSError:
                 break
+            kind = None
             try:
                 request = conn.recv()
                 last_request[0] = time.time()
                 kind = request.get("kind", "word")
-                app = app_for(kind)
-                if kind == "ppt":
-                    meta = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
-                else:
-                    meta = export_via_word(app, Path(request["source"]), Path(request["entry"]))
+                for attempt in (0, 1):
+                    app = app_for(kind)
+                    try:
+                        if kind == "ppt":
+                            meta = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
+                        else:
+                            meta = export_via_word(app, Path(request["source"]), Path(request["entry"]))
+                        break
+                    except Exception:
+                        # Dead COM handle (killed/crashed app) is unrecoverable:
+                        # drop it once and let app_for respawn. Document-level
+                        # errors on a live app are raised straight through.
+                        pid = owners.get(kind, (None,))[0]
+                        if attempt or (pid is not None and psutil.pid_exists(pid)):
+                            raise
+                        apps.pop(kind, None)
+                        owners.pop(kind, None)
                 conn.send({"ok": True, **meta})
             except Exception as exc:
                 try:
