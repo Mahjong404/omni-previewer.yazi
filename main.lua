@@ -118,7 +118,7 @@ local function text_cache(job)
 	for i = 1, #url do
 		h = (h * 33 + url:byte(i)) % 4294967296
 	end
-	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v5.ansi",
+	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v6.ansi",
 		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0),
 		job.area.w, job.area.h)
 end
@@ -170,7 +170,7 @@ local function word_probe(job, key, edge)
 		:output()
 	local result = output and output.status.success and ya.json_decode(output.stdout) or nil
 	if result and result.image then
-		state_ready(key, { dir = result.dir, edge = result.edge, pages = result.pages })
+		state_ready(key, { dir = result.dir, edge = result.edge, pages = result.pages, png = result.png })
 		return show_image(job, result.image, result.page)
 	end
 	if output and output.stderr and output.stderr:match("PREVFAILED") then
@@ -190,7 +190,8 @@ local function word_peek(job)
 	edge_seen(edge)
 	if info then
 		local page = math.min(job.skip, info.pages - 1)
-		local image = info.dir .. "/page-" .. page .. "-" .. info.edge .. ".jpg"
+		local image = info.png and (info.dir .. "/page-" .. page .. ".png")
+			or (info.dir .. "/page-" .. page .. "-" .. info.edge .. ".jpg")
 		if fs.cha(Url(image)) then
 			return show_image(job, image, page)
 		end
@@ -205,7 +206,7 @@ local function word_peek(job)
 		:output()
 	local result = output and output.status.success and ya.json_decode(output.stdout) or nil
 	if result and result.image then
-		state_ready(key, { dir = result.dir, edge = result.edge, pages = result.pages })
+		state_ready(key, { dir = result.dir, edge = result.edge, pages = result.pages, png = result.png })
 		return show_image(job, result.image, result.page)
 	end
 

@@ -68,7 +68,7 @@ def media_path(cache_base, kind, src, ext=".png"):
     """Content-hashed media cache so re-renders/edits reuse generated assets."""
     d = os.path.join(os.path.dirname(cache_base) or ".", "md-media")
     os.makedirs(d, exist_ok=True)
-    h = hashlib.sha256(("v2\n" + kind + "\n" + src).encode("utf-8")).hexdigest()[:20]
+    h = hashlib.sha256(("v3\n" + kind + "\n" + src).encode("utf-8")).hexdigest()[:20]
     return os.path.join(d, h + ext)
 
 
@@ -97,6 +97,8 @@ GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "
          "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ",
          "nu": "ν", "xi": "ξ", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ",
          "upsilon": "υ", "phi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+         "varepsilon": "ε", "varphi": "φ", "vartheta": "ϑ", "varrho": "ϱ",
+         "varsigma": "ς", "varkappa": "ϰ", "varpi": "ϖ", "ell": "ℓ",
          "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
          "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω"}
 OPS = {"sum": "Σ", "prod": "Π", "int": "∫", "iint": "∬", "iiint": "∭", "oint": "∮",
@@ -160,8 +162,11 @@ def _frac_sqrt_pass(s):
 
 ACCENTS = {"hat": "̂", "bar": "̄", "overline": "̅", "vec": "⃗",
            "dot": "̇", "ddot": "̈", "tilde": "̃", "breve": "̆", "check": "̌"}
-FONTS = ("boldsymbol", "bm", "mathbf", "mathbfit", "mathit", "mathrm", "mathsf",
-         "mathtt", "mathcal", "mathbb", "mathfrak", "text", "operatorname")
+FONTS_BOLD = ("boldsymbol", "bm", "mathbf", "mathbfit", "pmb")
+FONTS = ("mathit", "mathrm", "mathsf", "mathtt", "mathcal", "mathfrak",
+         "text", "operatorname")
+BB = {"C": "ℂ", "D": "𝔻", "E": "𝔼", "F": "𝔽", "H": "ℍ", "K": "𝕂",
+      "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R": "ℝ", "Z": "ℤ"}
 
 
 def _accent(s):
@@ -177,6 +182,13 @@ def math_unicode(s):
     while prev != s:
         prev = s
         s = _frac_sqrt_pass(s)
+    s = re.sub(r"\\(?:" + "|".join(FONTS_BOLD) + r")\s*\{([^{}]*)\}",
+               "\x1b[1m\\1\x1b[22m", s)
+    s = re.sub(r"\\(?:" + "|".join(FONTS_BOLD) + r")\s+(\w)",
+               "\x1b[1m\\1\x1b[22m", s)
+    s = re.sub(r"\\mathbb\s*\{([^{}]*)\}",
+               lambda m: "".join(BB.get(c, c) for c in m.group(1)), s)
+    s = re.sub(r"\\mathbb\s+(\w)", lambda m: BB.get(m.group(1), m.group(1)), s)
     s = re.sub(r"\\(?:" + "|".join(FONTS) + r")\s*\{([^{}]*)\}", r"\1", s)
     s = re.sub(r"\\(?:" + "|".join(FONTS) + r")\s+(\w)", r"\1", s)
     s = _accent(s)
@@ -194,6 +206,40 @@ def math_unicode(s):
 
 _TEX_DOC = (r"\documentclass{article}\usepackage{amsmath,amssymb,mathtools}"
             r"\pagestyle{empty}\begin{document}$%s$\end{document}")
+_XETEX_DOC = (r"\documentclass{article}\usepackage{amsmath,amssymb,mathtools}"
+             r"\usepackage{xeCJK}\pagestyle{empty}\begin{document}$%s$\end{document}")
+_CJK = re.compile(r"[一-鿿　-〿＀-￯]")
+
+
+def _math_png_xelatex(latex, out_path):
+    """xelatex + xeCJK + pdftocairo: same quality as latex/dvipng but with
+    CJK glyph support for \text{中文} inside formulas."""
+    xe, cairo = shutil.which("xelatex"), shutil.which("pdftocairo")
+    if not (xe and cairo):
+        return False
+    tmpdir = out_path + ".xetex.d"
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+        with open(os.path.join(tmpdir, "m.tex"), "w", encoding="utf-8") as f:
+            f.write(_XETEX_DOC % latex)
+        r = subprocess.run([xe, "-interaction=nonstopmode", "-halt-on-error", "m.tex"],
+                           cwd=tmpdir, capture_output=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        pdf = os.path.join(tmpdir, "m.pdf")
+        if r.returncode != 0 or not os.path.exists(pdf):
+            return False
+        prefix = os.path.abspath(out_path)
+        if prefix.lower().endswith(".png"):
+            prefix = prefix[:-4]
+        r = subprocess.run([cairo, "-png", "-transp", "-r", "220", "-singlefile",
+                            os.path.abspath(pdf), prefix],
+                           cwd=tmpdir, capture_output=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return r.returncode == 0 and os.path.exists(out_path)
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _math_png_latex(latex, out_path):
@@ -214,7 +260,8 @@ def _math_png_latex(latex, out_path):
         if r.returncode != 0 or not os.path.exists(dvi):
             return False
         r = subprocess.run([dvipng, "-T", "tight", "-D", "220", "-bg", "Transparent",
-                            "-fg", "rgb 1 1 1", "-o", out_path, dvi],
+                            "-fg", "rgb 1 1 1", "-o", os.path.abspath(out_path),
+                            os.path.abspath(dvi)],
                            cwd=tmpdir, capture_output=True, timeout=30,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return r.returncode == 0 and os.path.exists(out_path)
@@ -227,7 +274,12 @@ def _math_png_latex(latex, out_path):
 def math_png(latex, out_path):
     if os.path.exists(out_path):
         return True
+    if _CJK.search(latex):
+        if _math_png_xelatex(latex, out_path):
+            return True
     if _math_png_latex(latex, out_path):
+        return True
+    if _math_png_xelatex(latex, out_path):
         return True
     try:
         import matplotlib
@@ -401,9 +453,9 @@ def render_inline(s):
 
     s = re.sub(r"`([^`]+)`", lambda m: keep(CODE + " " + m.group(1) + " " + RESET), s)
     s = re.sub(r"\$([^$\n]+)\$", lambda m: keep(ITAL + (math_unicode(m.group(1)) if not re.search(r"\\(begin|end|matrix|cases|aligned|split)\b", m.group(1)) else m.group(1)) + RESET), s)
-    s = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", lambda m: keep(DIM + "[image: " + (m.group(1) or m.group(2)) + "]" + RESET), s)
+    s = re.sub(r"!\[([^\]]*)\]\(([^)]*)\)", lambda m: keep(DIM + "[image: " + (m.group(1) or m.group(2)) + "]" + RESET), s)
     s = re.sub(r"\[\[([^\]]+)\]\]", lambda m: keep(UND + CYAN + m.group(1) + RESET), s)
-    s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", lambda m: keep(UND + CYAN + m.group(1) + RESET + DIM + "(" + m.group(2) + ")" + RESET), s)
+    s = re.sub(r"\[([^\]]+)\]\(([^)]*)\)", lambda m: keep(UND + CYAN + m.group(1) + RESET + DIM + "(" + m.group(2).strip() + ")" + RESET), s)
     s = re.sub(r"==([^=]+)==", lambda m: keep(HL + " " + m.group(1) + " " + RESET), s)
     s = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: keep(BOLD_TXT + (m.group(1) or m.group(2)) + RESET), s)
     s = re.sub(r"~~([^~]+)~~", lambda m: keep(STRIKE + m.group(1) + RESET), s)
@@ -467,30 +519,53 @@ def render(md_path, cache_base, max_width=0, max_height=0):
     base = os.path.dirname(md_path)
     media = []
     out = []
-    pre = set()  # line indexes that must not be re-wrapped (code/diagrams/grids)
+    jobs = {}    # path -> (kind, src): PNG producers run in parallel post-parse
+    slots = []   # (insert_idx, path, entry, fallback): blank rows spliced later
     i = 0
     fence = re.compile(r"^(\s*)(`{3,}|~{3,})\s*([\w+-]*)\s*$")
+    PRE_MARK = "\x02"  # sentinel: line is pre-rendered, must not be re-wrapped
 
     def emit_pre(ls):
-        pre.update(range(len(out), len(out) + len(ls)))
-        out.extend(ls)
+        out.extend(PRE_MARK + l for l in ls)
 
-    def emit_media(path, caption):
-        """Reserve placeholder rows; main.lua overlays the real image via
-        image_show into that sub-rect (native resolution, scrolls with text)."""
-        out.append(DIM + caption + RESET)
-        size = img_size(path) or (0, 0)
-        w_px, h_px = size
-        if w_px > 0:
-            rows = max(2, round(h_px * (max_width or 60) / w_px / 2))
-        else:
-            rows = 8
-        if max_height:
-            rows = min(rows, max(4, max_height - 2))
-        rows = min(rows, 30)
-        line = len(out)
-        out.extend([""] * rows)
-        media.append({"line": line, "lines": rows, "path": path})
+    def queue_png(kind, src):
+        path = media_path(cache_base, kind, src)
+        jobs.setdefault(path, (kind, src))
+        return path
+
+    def emit_media(path, caption=None, fallback=None):
+        """Reserve placeholder rows (spliced after generation); main.lua
+        overlays the real image into that sub-rect via image_show."""
+        if caption:
+            out.append(DIM + caption + RESET)
+        entry = {"line": 0, "lines": 0, "path": path}
+        slots.append((len(out), path, entry, fallback))
+        media.append(entry)
+
+    def emit_rich(text, prefix=""):
+        """Text line; complex inline math ($..$ with environments) is
+        promoted to a rendered media block instead of raw LaTeX."""
+        segs = re.split(r"(\$[^$\n]+\$)", text)
+        if len(segs) == 1:
+            out.append(prefix + render_inline(text))
+            return
+        buf = ""
+
+        def flush():
+            nonlocal buf
+            if buf.strip():
+                out.append(prefix + render_inline(buf))
+            buf = ""
+
+        for s in segs:
+            if len(s) > 2 and s.startswith("$") and s.endswith("$") and \
+                    re.search(r"\\(begin|end)\b", s):
+                flush()
+                emit_media(queue_png("math", s[1:-1]), None,
+                           fallback=re.sub(r"\s+", " ", s[1:-1]).strip())
+            else:
+                buf += s
+        flush()
 
     while i < len(lines):
         line = lines[i]
@@ -506,9 +581,8 @@ def render(md_path, cache_base, max_width=0, max_height=0):
             if not lang and "@start" in src:
                 lang = "plantuml"
             if lang == "mermaid":
-                png = media_path(cache_base, "mermaid", src)
-                if mmdc_png(src, png):
-                    emit_media(png, "◆ mermaid")
+                if shutil.which("mmdc"):
+                    emit_media(queue_png("mermaid", src), "◆ mermaid")
                 else:
                     txt = mermaid_text(src)
                     if txt:
@@ -522,13 +596,11 @@ def render(md_path, cache_base, max_width=0, max_height=0):
                 if txt:
                     out.append(DIM + "◆ plantuml" + RESET)
                     emit_pre(txt)
+                elif os.path.exists(PLANTUML_JAR):
+                    emit_media(queue_png("plantuml", src), "◆ plantuml")
                 else:
-                    png = media_path(cache_base, "plantuml", src)
-                    if plantuml_png(src, png):
-                        emit_media(png, "◆ plantuml")
-                    else:
-                        out.append(DIM + "[plantuml diagram — renderer unavailable]" + RESET)
-                        emit_pre([DIM + "│ " + RESET + l for l in highlight(src, "java")])
+                    out.append(DIM + "[plantuml diagram — renderer unavailable]" + RESET)
+                    emit_pre([DIM + "│ " + RESET + l for l in highlight(src, "java")])
             else:
                 out.append(DIM + "```" + lang + RESET)
                 emit_pre([DIM + "│ " + RESET + l for l in highlight(src, lang)])
@@ -548,11 +620,8 @@ def render(md_path, cache_base, max_width=0, max_height=0):
             if uni and not degrade:
                 out.append("    " + ITAL + uni + RESET)
             elif latex:
-                png = media_path(cache_base, "math", latex)
-                if math_png(latex, png):
-                    emit_media(png, "◈ " + re.sub(r"\s+", " ", latex)[:60])
-                else:
-                    out.append("    " + ITAL + (uni or latex) + RESET)
+                emit_media(queue_png("math", latex), None,
+                           fallback=re.sub(r"\s+", " ", latex).strip())
             i = j + 1
             continue
         if st.startswith("|") and "|" in st[1:]:
@@ -561,7 +630,7 @@ def render(md_path, cache_base, max_width=0, max_height=0):
                 emit_pre(tbl)
                 i = ni
                 continue
-        mimg = re.match(r"^!\[([^\]]*)\]\(([^)\s]+)\)\s*$", st)
+        mimg = re.match(r"^!\[([^\]]*)\]\(([^)]*)\)\s*$", st)
         if mimg:
             target = mimg.group(2)
             if re.match(r"(?i)^https?://", target):
@@ -593,25 +662,72 @@ def render(md_path, cache_base, max_width=0, max_height=0):
             continue
         lm = re.match(r"^(\s*)([-*+]|\d+\.)\s+(.*)$", line)
         if lm:
-            hang_w = len(lm.group(1)) + len(lm.group(2)) + 1
-            body = render_inline(lm.group(3))
-            wl = wrap_ansi(body, max(10, (max_width or 80) - hang_w))
-            out.append(lm.group(1) + CYAN + lm.group(2) + RESET + " " + wl[0])
-            out.extend(" " * hang_w + l for l in wl[1:])
+            body = lm.group(3)
+            if re.search(r"\$[^$\n]*\\(?:begin|end)\b[^$\n]*\$", body):
+                emit_rich(body, lm.group(1) + CYAN + lm.group(2) + RESET + " ")
+            else:
+                hang_w = len(lm.group(1)) + len(lm.group(2)) + 1
+                wl = wrap_ansi(render_inline(body), max(10, (max_width or 80) - hang_w))
+                out.append(lm.group(1) + CYAN + lm.group(2) + RESET + " " + wl[0])
+                out.extend(" " * hang_w + l for l in wl[1:])
             i += 1
             continue
-        out.append(render_inline(line) if st else "")
+        if st:
+            emit_rich(line)
+        else:
+            out.append("")
         i += 1
+    # Generate all queued media in parallel (mmdc/latex/plantuml are
+    # independent subprocesses; serialized would multiply first-open time).
+    if jobs:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _gen(item):
+            path, (kind, src) = item
+            if os.path.exists(path):
+                return
+            try:
+                {"mermaid": mmdc_png, "plantuml": plantuml_png,
+                 "math": math_png}[kind](src, path)
+            except Exception:
+                pass
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(_gen, jobs.items()))
+    # Splice placeholder rows (or a readable fallback line) at each slot.
+    # Ascending order + cumulative offset: slot indexes were recorded before
+    # any rows were inserted, so each splice shifts positions below it.
+    offset = 0
+    for idx, path, entry, fb in sorted(slots, key=lambda t: t[0]):
+        pos = idx + offset
+        size = img_size(path) if os.path.exists(path) else None
+        if size and size[0] > 0:
+            rows = max(2, round(size[1] * (max_width or 60) / size[0] / 2))
+            if max_height:
+                rows = min(rows, max(4, max_height - 2))
+            rows = min(rows, 30)
+            out[pos:pos] = [""] * rows
+            entry["line"], entry["lines"] = pos, rows
+        else:
+            rows = 1
+            out[pos:pos] = ["    " + DIM + (fb or "[image unavailable]") + RESET]
+            media.remove(entry)
+        offset += rows
     # Wrap every wrappable line to the pane width so manifest line numbers map
     # 1:1 to screen rows (main.lua displays with Wrap.NO and overlays media).
     if max_width:
         idx_map, wrapped = {}, []
         for n, l in enumerate(out):
             idx_map[n] = len(wrapped)
-            wrapped.extend([l] if n in pre else wrap_ansi(l, max_width))
+            if l.startswith(PRE_MARK):
+                wrapped.append(l[1:])
+            else:
+                wrapped.extend(wrap_ansi(l, max_width))
         for m in media:
             m["line"] = idx_map.get(m["line"], m["line"])
         out = wrapped
+    else:
+        out = [l[1:] if l.startswith(PRE_MARK) else l for l in out]
     return {"text": "\n".join(out), "media": media}
 
 

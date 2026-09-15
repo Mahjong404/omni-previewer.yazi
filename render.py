@@ -199,11 +199,41 @@ def start_powerpoint():
     return app, pid, created
 
 
+PPT_PX = 1600  # long-edge pixels for direct slide PNG export
+
+
 def export_via_ppt(app, source, entry):
+    """Slides → page-N.png directly (Presentation.Export), skipping the
+    PDF + pdftoppm round-trip. Falls back to PDF export on failure."""
     pres = app.Presentations.Open(str(source), ReadOnly=-1, Untitled=0, WithWindow=0)
     try:
-        pres.SaveAs(str(entry / "document.pdf"), 32)  # ppSaveAsPDF
-        return pres.Slides.Count
+        count = pres.Slides.Count
+        try:
+            w_pt, h_pt = float(pres.PageSetup.SlideWidth), float(pres.PageSetup.SlideHeight)
+            if w_pt >= h_pt:
+                sw, sh = PPT_PX, max(1, round(PPT_PX * h_pt / w_pt))
+            else:
+                sh, sw = PPT_PX, max(1, round(PPT_PX * w_pt / h_pt))
+            out_dir = entry / "slides"
+            pres.Export(str(out_dir), "PNG", sw, sh)
+            renamed = 0
+            for f in sorted(out_dir.iterdir()):
+                m = re.search(r"(\d+)", f.stem)
+                if m:
+                    os.replace(f, entry / f"page-{int(m.group(1)) - 1}.png")
+                    renamed += 1
+            try:
+                out_dir.rmdir()
+            except OSError:
+                pass
+            if renamed == count and count > 0:
+                return {"pages": count, "png": True}
+            for f in entry.glob("page-*.png"):
+                f.unlink(missing_ok=True)
+        except Exception:
+            pass
+        pres.SaveAs(str(entry / "document.pdf"), 32)  # ppSaveAsPDF fallback
+        return {"pages": count}
     finally:
         pres.Close()
 
@@ -219,7 +249,7 @@ def export_via_word(app, source, entry):
             OutputFileName=str(entry / "document.pdf"), ExportFormat=17,
             OpenAfterExport=False, OptimizeFor=1, IncludeDocProps=False,
         )
-        return document.ComputeStatistics(2)
+        return {"pages": document.ComputeStatistics(2)}
     finally:
         document.Close(SaveChanges=0)
 
@@ -235,12 +265,12 @@ def export_office(source, entry):
         if kind == "ppt":
             app, pid, created = start_powerpoint()
             owned = pid is not None
-            pages = export_via_ppt(app, source, entry)
+            metadata = export_via_ppt(app, source, entry)
         else:
             app, pid, created = start_word()
-            pages = export_via_word(app, source, entry)
+            metadata = export_via_word(app, source, entry)
         (entry / "owner.json").write_text(json.dumps({"pid": pid or 0, "created": created or 0}), encoding="utf-8")
-        print(json.dumps({"pages": pages}), flush=True)
+        print(json.dumps(metadata), flush=True)
     finally:
         try:
             if app is not None and owned:
@@ -341,7 +371,7 @@ def export_via_server(source, entry, timeout, kind="word"):
         conn.close()
     if not reply.get("ok"):
         raise RuntimeError(reply.get("error", "Word conversion failed"))
-    return {"pages": reply["pages"]}
+    return {"pages": reply["pages"], "png": reply.get("png")}
 
 
 def serve():
@@ -414,10 +444,10 @@ def serve():
                 kind = request.get("kind", "word")
                 app = app_for(kind)
                 if kind == "ppt":
-                    pages = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
+                    meta = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
                 else:
-                    pages = export_via_word(app, Path(request["source"]), Path(request["entry"]))
-                conn.send({"ok": True, "pages": pages})
+                    meta = export_via_word(app, Path(request["source"]), Path(request["entry"]))
+                conn.send({"ok": True, **meta})
             except Exception as exc:
                 try:
                     conn.send({"ok": False, "error": str(exc)[-800:]})
@@ -565,21 +595,30 @@ def render(source, page, edge, probe=False, lock_timeout=None):
                 pass
             pdf = source if is_pdf else entry / "document.pdf"
             page = max(0, min(page, metadata["pages"] - 1))
-            targets = {page, page + 1} | ({0, 1, 2} if converted else set())
-            for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
-                try:
-                    render_page(entry, target, edge, pdf)
-                except Exception:
-                    pass
-            image = render_page(entry, page, edge, pdf)
-            os.utime(image, None)
+            if metadata.get("png"):
+                # PPT path: Presentation.Export already wrote every slide as
+                # page-N.png at a fixed resolution - nothing left to rasterize.
+                image = entry / f"page-{page}.png"
+                if not image.exists():
+                    raise RuntimeError(f"slide image missing: {image.name}")
+                os.utime(image, None)
+            else:
+                targets = {page, page + 1} | ({0, 1, 2} if converted else set())
+                for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
+                    try:
+                        render_page(entry, target, edge, pdf)
+                    except Exception:
+                        pass
+                image = render_page(entry, page, edge, pdf)
+                os.utime(image, None)
             pages = sorted(entry.glob("page-*.jpg"), key=lambda f: f.stat().st_mtime, reverse=True)
             for obsolete in pages[50:]:
                 obsolete.unlink()
             os.utime(entry, None)
             prune(entry)
             return {"image": str(image), "dir": str(entry), "edge": edge,
-                    "page": page, "pages": metadata["pages"], "cached": not converted, "converted": converted}
+                    "page": page, "pages": metadata["pages"], "png": bool(metadata.get("png")),
+                    "cached": not converted, "converted": converted}
         except Exception as exc:
             if not probe:
                 shutil.rmtree(entry, ignore_errors=True)
@@ -622,7 +661,7 @@ if __name__ == "__main__":
                 try:
                     src = Path(args[0])
                     pdf = src if src.suffix.lower() == ".pdf" else Path(result["dir"]) / "document.pdf"
-                    if result.get("pages", 0) <= 60:
+                    if not result.get("png") and pdf.exists() and result.get("pages", 0) <= 60:
                         render_all_pages(Path(result["dir"]), result["edge"], pdf, result["pages"])
                 except Exception:
                     pass
