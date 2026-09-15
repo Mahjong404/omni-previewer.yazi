@@ -205,39 +205,59 @@ PPT_PX = 1600  # long-edge pixels for direct slide PNG export
 
 
 def export_via_ppt(app, source, entry):
-    """Slides → page-N.png directly (Presentation.Export), skipping the
-    PDF + pdftoppm round-trip. Falls back to PDF export on failure."""
+    """Slides → page-N.png. First slides go out individually so page 0 is
+    usable immediately; the rest are bulk-exported in tail() which runs
+    after the reply is sent. Falls back to PDF export on failure."""
     pres = app.Presentations.Open(str(source), ReadOnly=-1, Untitled=0, WithWindow=0)
     try:
         count = pres.Slides.Count
+        w_pt, h_pt = float(pres.PageSetup.SlideWidth), float(pres.PageSetup.SlideHeight)
+        if w_pt >= h_pt:
+            sw, sh = PPT_PX, max(1, round(PPT_PX * h_pt / w_pt))
+        else:
+            sh, sw = PPT_PX, max(1, round(PPT_PX * w_pt / h_pt))
         try:
-            w_pt, h_pt = float(pres.PageSetup.SlideWidth), float(pres.PageSetup.SlideHeight)
-            if w_pt >= h_pt:
-                sw, sh = PPT_PX, max(1, round(PPT_PX * h_pt / w_pt))
-            else:
-                sh, sw = PPT_PX, max(1, round(PPT_PX * w_pt / h_pt))
-            out_dir = entry / "slides"
-            pres.Export(str(out_dir), "PNG", sw, sh)
-            renamed = 0
-            for f in sorted(out_dir.iterdir()):
-                m = re.search(r"(\d+)", f.stem)
-                if m:
-                    os.replace(f, entry / f"page-{int(m.group(1)) - 1}.png")
-                    renamed += 1
-            try:
-                out_dir.rmdir()
-            except OSError:
-                pass
-            if renamed == count and count > 0:
-                return {"pages": count, "png": True}
-            for f in entry.glob("page-*.png"):
-                f.unlink(missing_ok=True)
+            fast = min(3, count)
+            for i in range(1, fast + 1):
+                pres.Slides(i).Export(str(entry / f"page-{i - 1}.png"), "PNG", sw, sh)
+            if count <= fast:
+                pres.Close()
+                return {"pages": count, "png": True}, None
         except Exception:
             pass
-        pres.SaveAs(str(entry / "document.pdf"), 32)  # ppSaveAsPDF fallback
-        return {"pages": count}
-    finally:
-        pres.Close()
+
+        def tail():
+            try:
+                out_dir = entry / "slides"
+                pres.Export(str(out_dir), "PNG", sw, sh)
+                for f in sorted(out_dir.iterdir()):
+                    m = re.search(r"(\d+)", f.stem)
+                    if not m:
+                        continue
+                    target = entry / f"page-{int(m.group(1)) - 1}.png"
+                    if target.exists():
+                        f.unlink(missing_ok=True)
+                    else:
+                        os.replace(f, target)
+                try:
+                    out_dir.rmdir()
+                except OSError:
+                    pass
+            except Exception:
+                try:
+                    pres.SaveAs(str(entry / "document.pdf"), 32)  # ppSaveAsPDF fallback
+                except Exception:
+                    pass
+            finally:
+                pres.Close()
+
+        return {"pages": count, "png": True}, tail
+    except Exception:
+        try:
+            pres.Close()
+        except Exception:
+            pass
+        raise
 
 
 def export_via_word(app, source, entry):
@@ -428,16 +448,9 @@ def serve():
         return
     pythoncom.CoInitialize()
     apps, owners = {}, {}
-    try:
-        apps["word"], pid, created = start_word()
-        owners["word"] = (pid, created, True)
-    except Exception:
-        pythoncom.CoUninitialize()
-        sys.exit(1)
     identity_path = CACHE / ".server.json"
     identity_path.write_text(json.dumps(
-        {"server": os.getpid(), "server_created": psutil.Process().create_time(),
-         "word": owners["word"][0], "word_created": owners["word"][1]}), encoding="utf-8")
+        {"server": os.getpid(), "server_created": psutil.Process().create_time()}), encoding="utf-8")
 
     def app_for(kind):
         if kind not in apps:
@@ -454,7 +467,6 @@ def serve():
                 identity_path.write_text(json.dumps(data), encoding="utf-8")
             except Exception:
                 pass
-        return apps[kind]
         return apps[kind]
     stop = threading.Event()
     last_request = [time.time()]
@@ -479,6 +491,7 @@ def serve():
             except OSError:
                 break
             kind = None
+            tail = None
             try:
                 request = conn.recv()
                 last_request[0] = time.time()
@@ -487,7 +500,7 @@ def serve():
                     app = app_for(kind)
                     try:
                         if kind == "ppt":
-                            meta = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
+                            meta, tail = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
                         else:
                             meta = export_via_word(app, Path(request["source"]), Path(request["entry"]))
                         break
@@ -508,6 +521,11 @@ def serve():
                     pass
             finally:
                 conn.close()
+            if tail is not None:
+                try:
+                    tail()
+                except Exception:
+                    pass
     finally:
         for kind, app in apps.items():
             try:
@@ -649,9 +667,12 @@ def render(source, page, edge, probe=False, lock_timeout=None):
             pdf = source if is_pdf else entry / "document.pdf"
             page = max(0, min(page, metadata["pages"] - 1))
             if metadata.get("png"):
-                # PPT path: Presentation.Export already wrote every slide as
-                # page-N.png at a fixed resolution - nothing left to rasterize.
+                # PPT path: slide 1..3 arrive first; the rest are still being
+                # exported in the server tail - poll briefly before giving up.
                 image = entry / f"page-{page}.png"
+                deadline = time.monotonic() + 15
+                while not image.exists() and time.monotonic() < deadline:
+                    time.sleep(0.2)
                 if not image.exists():
                     raise RuntimeError(f"slide image missing: {image.name}")
                 os.utime(image, None)

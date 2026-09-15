@@ -68,7 +68,7 @@ def media_path(cache_base, kind, src, ext=".png"):
     """Content-hashed media cache so re-renders/edits reuse generated assets."""
     d = os.path.join(os.path.dirname(cache_base) or ".", "md-media")
     os.makedirs(d, exist_ok=True)
-    h = hashlib.sha256(("v3\n" + kind + "\n" + src).encode("utf-8")).hexdigest()[:20]
+    h = hashlib.sha256(("v4\n" + kind + "\n" + src).encode("utf-8")).hexdigest()[:20]
     return os.path.join(d, h + ext)
 
 
@@ -304,8 +304,8 @@ def mmdc_png(src, out_path):
         tmp = out_path + ".mmd"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(src)
-        r = subprocess.run([mmdc, "-i", tmp, "-o", out_path, "-b", "transparent",
-                            "-s", "2", "-w", "1400", "-q"],
+        r = subprocess.run([mmdc, "-i", tmp, "-o", out_path, "-t", "dark",
+                            "-b", "#1e1e2e", "-s", "2", "-w", "1400", "-q"],
                            capture_output=True, timeout=60,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         os.path.exists(tmp) and os.remove(tmp)

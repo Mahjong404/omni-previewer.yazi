@@ -31,14 +31,22 @@ end)
 
 local state_pending = ya.sync(function(state, key)
 	state.pending = state.pending or {}
-	state.pending[key] = true
+	state.pending[key] = os.time()
 end)
 
 local state_fail = ya.sync(function(state, key)
 	state.failed = state.failed or {}
-	state.failed[key] = true
+	local prev = state.failed[key]
+	state.failed[key] = { t = os.time(), n = (type(prev) == "table" and prev.n or 0) + 1 }
 	state.pending = state.pending or {}
 	state.pending[key] = nil
+end)
+
+local state_retry_arm = ya.sync(function(state, key)
+	local f = state.failed and state.failed[key]
+	if type(f) == "table" then
+		f.t = os.time()
+	end
 end)
 
 local state_unfail = ya.sync(function(state)
@@ -108,7 +116,7 @@ local function ansi_peek(job, text)
 	if page == nil then
 		return ya.emit("peek", { reskip, only_if = job.file.url, upper_bound = true })
 	end
-	ya.preview_widget(job, ui.Text(page):area(job.area))
+	ya.preview_widget(job, { ui.Clear(job.area), ui.Text(page):area(job.area) })
 end
 
 local function text_cache(job)
@@ -118,7 +126,7 @@ local function text_cache(job)
 	for i = 1, #url do
 		h = (h * 33 + url:byte(i)) % 4294967296
 	end
-	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v6.ansi",
+	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v7.ansi",
 		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0),
 		job.area.w, job.area.h)
 end
@@ -161,7 +169,9 @@ local function word_fallback(job)
 		end
 		return require("docx-preview"):peek(job)
 	end
-	ya.preview_widget(job, ui.Text({ ui.Line("Page image will appear when ready (text preview is unavailable for this format)") }):area(job.area))
+	ya.preview_widget(job, { ui.Clear(job.area), ui.Text({
+		ui.Line("Page image will appear when ready (text preview is unavailable for this format)"),
+	}):area(job.area) })
 end
 
 local function word_probe(job, key, edge)
@@ -179,10 +189,31 @@ local function word_probe(job, key, edge)
 	return word_fallback(job)
 end
 
+local function spawn_worker(job)
+	-- Detached --notify render: converts, then emits plugin "refresh" which
+	-- clears failed state and re-peeks. Best effort; spawn may be unavailable.
+	pcall(function()
+		Command(PYTHON)
+			:arg({ "-X", "utf8", plugin_file("render.py"), tostring(job.file.path), "0",
+				tostring(pane_edge(job)), "--notify", tostring(job.file.url) })
+			:spawn()
+	end)
+end
+
 local function word_peek(job)
 	local key = identity(job)
 	local text_mode, failed, info, pending = state_get(key)
-	if text_mode or failed then
+	if text_mode then
+		return word_fallback(job)
+	end
+	if failed then
+		-- Transient conversion failures used to stick for the whole session:
+		-- retry up to 3 times with a 20s cooldown; a success notifies "refresh"
+		-- which clears the failure and re-peeks automatically.
+		if failed.n <= 3 and os.time() - failed.t >= 20 then
+			state_retry_arm(key)
+			spawn_worker(job)
+		end
 		return word_fallback(job)
 	end
 
@@ -198,6 +229,12 @@ local function word_peek(job)
 		return word_probe(job, key, edge)
 	end
 	if pending then
+		-- pending is only a timestamped guess that a worker is in-flight; if it
+		-- is stale the worker died without notifying - kick a fresh one.
+		if os.time() - pending > 60 then
+			state_pending(key)
+			spawn_worker(job)
+		end
 		return word_fallback(job)
 	end
 
@@ -248,6 +285,11 @@ local MD_EXTS = { md = true, markdown = true }
 local function md_peek(job)
 	local text_mode = state_get(identity(job))
 	if text_mode then
+		-- Drop any overlay image still painted from rendered mode (best effort;
+		-- the builtin code peeker cannot erase it for us).
+		pcall(function()
+			ya.image_hide()
+		end)
 		return require("code"):peek(job)
 	end
 	local raw = script_peek(job, "md.py")
@@ -260,12 +302,13 @@ local function md_peek(job)
 	end
 	-- Text is pre-wrapped to pane width by md.py, so manifest line numbers map
 	-- 1:1 to screen rows: overlay each media image into its placeholder sub-rect.
+	-- ui.Clear wipes leftovers of earlier overlay cells that scrolled out.
 	local lines = ansi_lines(job, manifest.text, true)
 	local page, reskip = ansi_page(job, lines)
 	if page == nil then
 		return ya.emit("peek", { reskip, only_if = job.file.url, upper_bound = true })
 	end
-	ya.preview_widget(job, ui.Text(page):area(job.area))
+	ya.preview_widget(job, { ui.Clear(job.area), ui.Text(page):area(job.area) })
 	local limit = job.area.h
 	for _, m in ipairs(manifest.media or {}) do
 		local top, h = tonumber(m.line) or -1, tonumber(m.lines) or 0
