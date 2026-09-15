@@ -65,6 +65,19 @@ local function identity(job)
 	return tostring(job.file.url) .. ":" .. tostring(job.file.cha.mtime) .. ":" .. tostring(job.file.cha.len)
 end
 
+-- Estimate the pane's pixel long-edge (cell ≈ 10x20 px) with 2x oversampling.
+-- Far smaller than the old max_width*16 default -> much faster JPEG decode.
+local function pane_edge(job)
+	return math.max(800, math.min(3200, math.max(job.area.w, job.area.h * 2) * 20))
+end
+
+local edge_seen = ya.sync(function(state, e)
+	if e then
+		state.last_edge = e
+	end
+	return state.last_edge
+end)
+
 local function show_image(job, image, page)
 	if page ~= job.skip then
 		return ya.emit("peek", { page, only_if = job.file.url, upper_bound = true })
@@ -173,7 +186,8 @@ local function word_peek(job)
 		return word_fallback(job)
 	end
 
-	local edge = math.max(600, math.min(3200, math.max(rt.preview.max_width, rt.preview.max_height) * 16))
+	local edge = pane_edge(job)
+	edge_seen(edge)
 	if info then
 		local page = math.min(job.skip, info.pages - 1)
 		local image = info.dir .. "/page-" .. page .. "-" .. info.edge .. ".jpg"
@@ -287,12 +301,10 @@ function M:preload(job)
 	if not file or not PAGE_EXTS[ext_of(file.url)] then
 		return true
 	end
-	local ok, edge = pcall(function()
-		return math.max(600, math.min(3200, math.max(rt.preview.max_width, rt.preview.max_height) * 16))
-	end)
+	local edge = edge_seen() or 1600
 	Command(PYTHON)
 		:arg({ "-X", "utf8", plugin_file("render.py"), tostring(file.path or file.url), "0",
-			tostring(ok and edge or 2000), "--notify", tostring(file.url) })
+			tostring(edge), "--notify", tostring(file.url) })
 		:output()
 	return true
 end

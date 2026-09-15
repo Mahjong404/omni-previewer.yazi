@@ -564,11 +564,6 @@ def render(source, page, edge, probe=False):
                 pass
             pdf = source if is_pdf else entry / "document.pdf"
             page = max(0, min(page, metadata["pages"] - 1))
-            if not probe and metadata["pages"] <= 60:
-                try:
-                    render_all_pages(entry, edge, pdf, metadata["pages"])
-                except Exception:
-                    pass
             targets = {page, page + 1} | ({0, 1, 2} if converted else set())
             for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
                 try:
@@ -618,6 +613,15 @@ if __name__ == "__main__":
             print(json.dumps(result), flush=True)
             if url:
                 notify(url, result["page"])
+                # Fill remaining pages in the background WITHOUT holding the
+                # cache lock, so probes/flips are never blocked by the batch.
+                try:
+                    src = Path(args[0])
+                    pdf = src if src.suffix.lower() == ".pdf" else Path(result["dir"]) / "document.pdf"
+                    if result.get("pages", 0) <= 60:
+                        render_all_pages(Path(result["dir"]), result["edge"], pdf, result["pages"])
+                except Exception:
+                    pass
     except ProbeMiss as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(2)

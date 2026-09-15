@@ -158,11 +158,28 @@ def _frac_sqrt_pass(s):
     return s[:m.start()] + a + "⁄" + b + s[end2:]
 
 
+ACCENTS = {"hat": "̂", "bar": "̄", "overline": "̅", "vec": "⃗",
+           "dot": "̇", "ddot": "̈", "tilde": "̃", "breve": "̆", "check": "̌"}
+FONTS = ("boldsymbol", "bm", "mathbf", "mathbfit", "mathit", "mathrm", "mathsf",
+         "mathtt", "mathcal", "mathbb", "mathfrak", "text", "operatorname")
+
+
+def _accent(s):
+    for name, mark in ACCENTS.items():
+        s = re.sub(r"\\" + name + r"\s*\{([^{}]*)\}",
+                   lambda m: "".join(c + mark for c in m.group(1)), s)
+        s = re.sub(r"\\" + name + r"\s+(\w)", lambda m: m.group(1) + mark, s)
+    return s
+
+
 def math_unicode(s):
     prev = None
     while prev != s:
         prev = s
         s = _frac_sqrt_pass(s)
+    s = re.sub(r"\\(?:" + "|".join(FONTS) + r")\s*\{([^{}]*)\}", r"\1", s)
+    s = re.sub(r"\\(?:" + "|".join(FONTS) + r")\s+(\w)", r"\1", s)
+    s = _accent(s)
     s = re.sub(r"\\(sum|prod|int|iint|iiint|oint|coprod|bigcup|bigcap|bigoplus|bigotimes)_\{([^{}]*)\}\^\{([^{}]*)\}",
                lambda m: OPS.get(m.group(1), m.group(1)) + "_" + m.group(2).translate(SUB) + "^" + m.group(3).translate(SUP), s)
     s = re.sub(r"\\(left|right|bigl|bigr|Bigl|Bigr|bigg|Bigg|big|Big|limits|displaystyle|quad|qquad|,|;|!| )", " ", s)
@@ -383,8 +400,9 @@ def render_inline(s):
         return TOK.format(len(spans) - 1)
 
     s = re.sub(r"`([^`]+)`", lambda m: keep(CODE + " " + m.group(1) + " " + RESET), s)
-    s = re.sub(r"\$([^$\n]+)\$", lambda m: keep(ITAL + math_unicode(m.group(1)) + RESET), s)
+    s = re.sub(r"\$([^$\n]+)\$", lambda m: keep(ITAL + (math_unicode(m.group(1)) if not re.search(r"\\(begin|end|matrix|cases|aligned|split)\b", m.group(1)) else m.group(1)) + RESET), s)
     s = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", lambda m: keep(DIM + "[image: " + (m.group(1) or m.group(2)) + "]" + RESET), s)
+    s = re.sub(r"\[\[([^\]]+)\]\]", lambda m: keep(UND + CYAN + m.group(1) + RESET), s)
     s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", lambda m: keep(UND + CYAN + m.group(1) + RESET + DIM + "(" + m.group(2) + ")" + RESET), s)
     s = re.sub(r"==([^=]+)==", lambda m: keep(HL + " " + m.group(1) + " " + RESET), s)
     s = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: keep(BOLD_TXT + (m.group(1) or m.group(2)) + RESET), s)
@@ -532,7 +550,7 @@ def render(md_path, cache_base, max_width=0, max_height=0):
             elif latex:
                 png = media_path(cache_base, "math", latex)
                 if math_png(latex, png):
-                    emit_media(png, "◈ " + (uni or latex))
+                    emit_media(png, "◈ " + re.sub(r"\s+", " ", latex)[:60])
                 else:
                     out.append("    " + ITAL + (uni or latex) + RESET)
             i = j + 1
