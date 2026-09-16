@@ -448,37 +448,60 @@ def serve():
         return
     pythoncom.CoInitialize()
     apps, owners = {}, {}
+    try:
+        apps["word"], pid, created = start_word()
+        owners["word"] = (pid, created, True)
+    except Exception:
+        pythoncom.CoUninitialize()
+        sys.exit(1)
     identity_path = CACHE / ".server.json"
     identity_path.write_text(json.dumps(
-        {"server": os.getpid(), "server_created": psutil.Process().create_time()}), encoding="utf-8")
+        {"server": os.getpid(), "server_created": psutil.Process().create_time(),
+         "word": owners["word"][0], "word_created": owners["word"][1]}), encoding="utf-8")
+
+    kind_locks = {"word": threading.Lock(), "ppt": threading.Lock()}
 
     def app_for(kind):
         if kind not in apps:
-            if kind == "ppt":
-                app, pid, created = start_powerpoint()
-            else:
-                app, pid, created = start_word()
-            apps[kind] = app
-            owners[kind] = (pid, created, kind != "ppt" or pid is not None)
-            try:
-                data = json.loads(identity_path.read_text(encoding="utf-8"))
-                data[kind] = pid or 0
-                data[kind + "_created"] = created or 0
-                identity_path.write_text(json.dumps(data), encoding="utf-8")
-            except Exception:
-                pass
+            with kind_locks[kind]:
+                if kind not in apps:
+                    if kind == "ppt":
+                        app, pid, created = start_powerpoint()
+                    else:
+                        app, pid, created = start_word()
+                    apps[kind] = app
+                    owners[kind] = (pid, created, kind != "ppt" or pid is not None)
+                    try:
+                        data = json.loads(identity_path.read_text(encoding="utf-8"))
+                        data[kind] = pid or 0
+                        data[kind + "_created"] = created or 0
+                        identity_path.write_text(json.dumps(data), encoding="utf-8")
+                    except Exception:
+                        pass
         return apps[kind]
     stop = threading.Event()
     last_request = [time.time()]
     listener = Listener(PIPE_NAME, family="AF_PIPE")
+    warmed = {"ppt": False}
 
     def watchdog():
+        from multiprocessing.connection import Client
         while not stop.wait(5):
-            if time.time() - last_request[0] > SERVER_IDLE:
+            idle = time.time() - last_request[0]
+            if idle > SERVER_IDLE:
                 break
+            # Pre-warm PowerPoint during idle gaps so the first PPT hover
+            # doesn't eat its ~5s COM boot. One-shot; failures stay lazy.
+            if not warmed["ppt"] and idle > 3 and "ppt" not in apps:
+                warmed["ppt"] = True
+                try:
+                    c = Client(PIPE_NAME, family="AF_PIPE")
+                    c.send({"kind": "ppt", "warm": True})
+                    c.close()
+                except Exception:
+                    pass
         stop.set()
         try:
-            from multiprocessing.connection import Client
             Client(PIPE_NAME, family="AF_PIPE").close()
         except Exception:
             pass
@@ -496,6 +519,10 @@ def serve():
                 request = conn.recv()
                 last_request[0] = time.time()
                 kind = request.get("kind", "word")
+                if request.get("warm"):
+                    app_for(kind)
+                    conn.send({"ok": True, "pages": 0})
+                    continue
                 for attempt in (0, 1):
                     app = app_for(kind)
                     try:

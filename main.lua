@@ -126,7 +126,7 @@ local function text_cache(job)
 	for i = 1, #url do
 		h = (h * 33 + url:byte(i)) % 4294967296
 	end
-	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v7.ansi",
+	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v8.ansi",
 		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0),
 		job.area.w, job.area.h)
 end

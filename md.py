@@ -161,7 +161,9 @@ def _frac_sqrt_pass(s):
 
 
 ACCENTS = {"hat": "̂", "bar": "̄", "overline": "̅", "vec": "⃗",
-           "dot": "̇", "ddot": "̈", "tilde": "̃", "breve": "̆", "check": "̌"}
+           "dot": "̇", "ddot": "̈", "tilde": "̃", "breve": "̆", "check": "̌",
+           "overrightarrow": "⃗", "overleftarrow": "⃖",
+           "overleftrightarrow": "⃡"}
 FONTS_BOLD = ("boldsymbol", "bm", "mathbf", "mathbfit", "pmb")
 FONTS = ("mathit", "mathrm", "mathsf", "mathtt", "mathcal", "mathfrak",
          "text", "operatorname")
@@ -175,6 +177,558 @@ def _accent(s):
                    lambda m: "".join(c + mark for c in m.group(1)), s)
         s = re.sub(r"\\" + name + r"\s+(\w)", lambda m: m.group(1) + mark, s)
     return s
+
+
+# ---------- 2-D math typesetting ----------
+# Renders LaTeX math as terminal text rows (folio-style: the formula is
+# text, not a raster image). A _MBox is a block of rows plus the index of
+# its baseline row; horizontal composition aligns baselines like TeX.
+
+
+class _MBox:
+    __slots__ = ("lines", "base", "big", "side")
+
+    def __init__(self, lines, base=0, big=False, side=False):
+        self.lines = lines
+        self.base = base
+        self.big = big      # limits stack above/below (Σ), not as scripts
+        self.side = side    # limits attach to the side (∫)
+
+    @property
+    def w(self):
+        return max((sum(_disp_w(c) for c in l) for l in self.lines), default=0)
+
+    @property
+    def h(self):
+        return len(self.lines)
+
+
+def _m_pad(s, w):
+    return s + " " * max(0, w - sum(_disp_w(c) for c in s))
+
+
+def _m_center(b, w):
+    out = []
+    for l in b.lines:
+        left = max(0, (w - sum(_disp_w(c) for c in l)) // 2)
+        out.append(" " * left + _m_pad(l, w - left))
+    return out
+
+
+def _m_atom(t):
+    return _MBox([t], 0)
+
+
+def _m_hcat(boxes):
+    boxes = [b for b in boxes if b is not None and b.h]
+    if not boxes:
+        return _MBox([""], 0)
+    base = max(b.base for b in boxes)
+    h = base + max(b.h - b.base for b in boxes)
+    rows = []
+    for r in range(h):
+        line = ""
+        for b in boxes:
+            i = r - (base - b.base)
+            seg = b.lines[i] if 0 <= i < b.h else ""
+            line += _m_pad(seg, b.w)
+        rows.append(line.rstrip())
+    return _MBox(rows, base)
+
+
+def _m_frac(num, den):
+    w = max(num.w, den.w) + 2
+    return _MBox(_m_center(num, w) + ["─" * w] + _m_center(den, w), num.h)
+
+
+SUP_CH = set("0123456789+-=()niabcedfghjklmoprtuvx")
+SUB_CH = set("0123456789+-=()aeoxhklmnpstijruv")
+
+
+def _m_script(base, sub, sup):
+    if base.h == 1:
+        ok = True
+        t = base.lines[0]
+        if sub and sub.h == 1 and set(sub.lines[0]) <= SUB_CH:
+            t += sub.lines[0].translate(SUB)
+        elif sub:
+            ok = False
+        if sup and sup.h == 1 and set(sup.lines[0]) <= SUP_CH:
+            t += sup.lines[0].translate(SUP)
+        elif sup:
+            ok = False
+        if ok:
+            return _MBox([t], 0)
+    off = base.w
+    rows = []
+    if sup:
+        rows += [" " * off + l for l in sup.lines]
+    rows += list(base.lines)
+    if sub:
+        rows += [" " * off + l for l in sub.lines]
+    b = _MBox(rows, base.base + (sup.h if sup else 0))
+    return b
+
+
+def _m_limits(base, sub, sup):
+    if base.side:
+        return _m_script(base, sub, sup)
+    w = max(base.w, sub.w if sub else 0, sup.w if sup else 0)
+    rows = []
+    if sup:
+        rows += _m_center(sup, w)
+    rows += _m_center(base, w)
+    if sub:
+        rows += _m_center(sub, w)
+    return _MBox(rows, base.base + (sup.h if sup else 0))
+
+
+def _m_attach(base, sub, sup):
+    if base.big:
+        return _m_limits(base, sub, sup)
+    return _m_script(base, sub, sup)
+
+
+def _m_sqrt(index, inner):
+    if inner.h == 1:
+        pre = (index.lines[0].translate(SUP) if index else "") + "√"
+        return _MBox([pre + "(" + inner.lines[0] + ")"], 0)
+    w = inner.w + 1
+    rows = ["  " + "─" * w]
+    for k, l in enumerate(inner.lines):
+        rows.append(("╲╱ " if k == inner.base else "   ") + l)
+    if index:
+        rows[0] = index.lines[0] + rows[0][len(index.lines[0]):] \
+            if len(index.lines[0]) <= 2 else "ⁿ" + rows[0][1:]
+    return _MBox(rows, inner.base + 1)
+
+
+_DELIMS = {"(": ("⎛", "⎜", "⎝", "⎜"), ")": ("⎞", "⎟", "⎠", "⎟"),
+           "[": ("⎡", "⎢", "⎣", "⎢"), "]": ("⎤", "⎥", "⎦", "⎥"),
+           "{": ("⎧", "⎨", "⎩", "⎪"), "}": ("⎫", "⎬", "⎭", "⎪"),
+           "|": ("│", "│", "│", "│"), "‖": ("‖", "‖", "‖", "‖"),
+           "⟨": ("⟨", "│", "⟨", "│"), "⟩": ("⟩", "│", "⟩", "│"),
+           ".": ("", "", "", "")}
+_DELIM_NAMES = {"(": "(", ")": ")", "[": "[", "]": "]", "{": "{", "}": "}",
+                "|": "|", ".": ".", "vert": "|", "Vert": "‖", "lvert": "|",
+                "rvert": "|", "langle": "⟨", "rangle": "⟩", "lbrace": "{",
+                "rbrace": "}", "lfloor": "⌊", "rfloor": "⌋", "lceil": "⌈",
+                "rceil": "⌉", "\\|": "‖"}
+_FLAT_DELIM = {"(": "(", ")": ")", "[": "[", "]": "]", "{": "{", "}": "}",
+               "|": "|", "‖": "‖", "⟨": "⟨", "⟩": "⟩", ".": ""}
+
+
+def _m_tall_col(kind, h):
+    if h <= 2:
+        t, b = _DELIMS[kind][0], _DELIMS[kind][2]
+        return [t] + [b] * (h - 1)
+    t, mid, b, fill = _DELIMS[kind]
+    center = (h - 1) // 2
+    return [t if i == 0 else b if i == h - 1 else mid if i == center else fill
+            for i in range(h)]
+
+
+def _m_wrap(l, inner, r):
+    if inner.h == 1:
+        return _MBox([_FLAT_DELIM[l] + inner.lines[0] + _FLAT_DELIM[r]], 0)
+    left = _m_tall_col(l, inner.h)
+    right = _m_tall_col(r, inner.h)
+    w = inner.w
+    rows = [left[i] + _m_pad(inner.lines[i], w) + right[i] for i in range(inner.h)]
+    return _MBox(rows, inner.base)
+
+
+def _m_toks(s):
+    toks, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\":
+            if s.startswith("\\\\", i):
+                toks.append("\\\\")
+                i += 2
+                continue
+            m = re.match(r"\\begin\s*\{([A-Za-z*]+)\}", s[i:])
+            if m:
+                toks.append(("begin", m.group(1)))
+                i += m.end()
+                continue
+            m = re.match(r"\\end\s*\{[A-Za-z*]+\}", s[i:])
+            if m:
+                toks.append(("end",))
+                i += m.end()
+                continue
+            m = re.match(r"\\([A-Za-z]+)", s[i:])
+            if m:
+                toks.append(("cmd", m.group(1)))
+                i += m.end()
+                continue
+            toks.append(("cmd", s[i + 1:i + 2] or " "))
+            i += 2
+            continue
+        if c in "{}^_&[]":
+            toks.append(c)
+            i += 1
+            continue
+        j = i
+        while j < n and s[j] not in "\\{}^_&[]":
+            j += 1
+        toks.append(s[i:j])
+        i = j
+    return toks
+
+
+def _m_parse(toks, i, stops=()):
+    cells = []
+    while i < len(toks):
+        t = toks[i]
+        if t in stops or (isinstance(t, tuple) and t[0] == "end"):
+            break
+        if t == "{":
+            b, i = _m_group(toks, i)
+            cells.append(b)
+            continue
+        if t == "^" or t == "_":
+            base = cells.pop() if cells else _m_atom("")
+            i += 1
+            a, i = _m_arg(toks, i)
+            sub, sup = (a, None) if t == "_" else (None, a)
+            if i < len(toks) and toks[i] in ("^", "_"):
+                t2 = toks[i]
+                i += 1
+                a2, i = _m_arg(toks, i)
+                if t2 == "^":
+                    sup = a2
+                else:
+                    sub = a2
+            cells.append(_m_attach(base, sub, sup))
+            continue
+        if t == "&" or t == "\\\\":
+            break
+        if isinstance(t, tuple):
+            if t[0] == "begin":
+                b, i = _m_env(toks, i)
+            else:
+                b, i = _m_cmd(toks, i)
+            cells.append(b)
+            continue
+        if t.strip():
+            cells.append(_m_atom(t))
+        i += 1
+    return _m_hcat(cells), i
+
+
+def _m_group(toks, i):
+    b, i = _m_parse(toks, i + 1, ("}",))
+    return b, i + 1
+
+
+def _m_arg(toks, i):
+    if i >= len(toks):
+        return _m_atom(""), i
+    t = toks[i]
+    if t == "{":
+        return _m_group(toks, i)
+    if isinstance(t, tuple) and t[0] == "begin":
+        return _m_env(toks, i)
+    if isinstance(t, tuple):
+        return _m_cmd(toks, i)
+    if t in ("^", "_", "&", "\\\\"):
+        return _m_atom(""), i
+    if len(t) > 1:
+        toks[i] = t[1:]
+        return _m_atom(t[0]), i
+    return _m_atom(t), i + 1
+
+
+_BIGOPS = {"sum": "Σ", "prod": "Π", "coprod": "∐", "bigcup": "⋃", "bigcap": "⋂",
+           "bigoplus": "⨁", "bigotimes": "⨂", "bigvee": "⋁", "bigwedge": "⋀",
+           "bigsqcup": "⨆", "bigodot": "⨀", "biguplus": "⨄"}
+_INTS = {"int": "∫", "iint": "∬", "iiint": "∭", "oint": "∮", "oiint": "∯",
+         "oiiint": "∰", "varoint": "∮", "ointctrclockwise": "∳"}
+_BIGLIM = {"lim", "limsup", "liminf", "sup", "inf", "max", "min",
+           "argmax", "argmin", "det", "gcd"}
+_FNAMES = {"log", "ln", "lg", "exp", "sin", "cos", "tan", "sec", "csc", "cot",
+           "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh", "coth", "sech",
+           "csch", "sign", "rank", "tr", "diag", "dim", "ker", "deg", "hom",
+           "Hom", "End", "Aut", "Pr", "mod", "bmod", "gcd", "lcm", "min", "max"}
+_TEXTFONTS = {"text", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mbox",
+              "hbox", "operatorname", "textbf", "textit", "textrm", "textnormal",
+              "textup", "boldsymbol", "bm", "pmb", "mathcal", "mathscr",
+              "mathfrak", "mathbfit", "displaystyle", "textstyle"}
+_SPACES = {",": " ", ";": " ", ":": " ", " ": " ", "quad": "  ", "qquad": "    ",
+           "!": "", "enspace": " ", "thinspace": " ", "medspace": " ",
+           "thickspace": " ", "negthinspace": "", "negmedspace": "",
+           "negthickspace": "", "~": " ", "nbsp": " "}
+_SKIPARG = {"tag", "label", "nonumber", "notag", "eqref", "ref", "pageref",
+            "kern", "hspace", "vspace", "mkern", "mspace", "rule", "phantom",
+            "hphantom", "vphantom", "mathclap", "mathllap", "mathrlap",
+            "clap", "llap", "rlap", "smash", "lefteqn", "color", "textcolor",
+            "colorbox", "fcolorbox", "pagecolor", "definecolor", "size",
+            "strut", "mathstrut", "noalign", "hline", "cline", "hdashline",
+            "vspace", "hspace", "raisebox", "displaylimits", "nolimits",
+            "limits", "displaystyle", "scriptstyle", "scriptscriptstyle",
+            "intertext", "shortintertext", "allowbreak", "numberwithin",
+            "ensuremath", "cr", "noalign", "mid", "relax"}
+
+
+def _m_lit(b):
+    """Flatten a box to a single literal line (for \\text{...} args)."""
+    return re.sub(r" {2,}", " ", " ".join(l.strip() for l in b.lines)).strip()
+
+
+def _m_accent(name, inner):
+    if name in ("overline", "overbar"):
+        if inner.h == 1:
+            return _m_atom("".join(c + "̅" for c in inner.lines[0]))
+        return _MBox(["‾" * inner.w] + inner.lines, inner.base + 1)
+    if name == "underline":
+        return _MBox(inner.lines + ["▁" * inner.w], inner.base)
+    mark = ACCENTS.get(name, "̂")
+    if inner.h == 1:
+        return _m_atom("".join(c + mark for c in inner.lines[0]))
+    lines = list(inner.lines)
+    lines[inner.base] = "".join(c + mark for c in inner.lines[inner.base])
+    return _MBox(lines, inner.base)
+
+
+def _m_arrow(name, sub, sup):
+    ch = "→" if "right" in name else "←"
+    w = max(4, (sup.w if sup else 0) + 2, (sub.w if sub else 0) + 2)
+    arrow = "─" * (w - 1) + ch if "right" in name else ch + "─" * (w - 1)
+    rows = _m_center(sup, w) + [arrow] if sup else [arrow]
+    if sub:
+        rows += _m_center(sub, w)
+    return _MBox(rows, sup.h if sup else 0)
+
+
+def _m_optarg(toks, i):
+    """[...] optional arg → literal string or None."""
+    if i >= len(toks) or toks[i] != "[":
+        return None, i
+    buf, j = "", i + 1
+    while j < len(toks) and toks[j] != "]":
+        t = toks[j]
+        buf += t[1] if isinstance(t, tuple) else t
+        j += 1
+    return buf, j + 1
+
+
+def _m_delim(toks, i):
+    """Delimiter after \\left/\\right/\\big*: a cmd token or the first
+    char of a literal run (spaces before it are skipped, rest pushed back)."""
+    if i >= len(toks):
+        return ".", i
+    t = toks[i]
+    if isinstance(t, tuple):
+        return _DELIM_NAMES.get(t[1], "."), i + 1
+    stripped = t.lstrip()
+    if not stripped:
+        return ".", i + 1
+    if stripped != t or len(stripped) > 1:
+        toks[i] = stripped[1:]
+        return _DELIM_NAMES.get(stripped[0], "."), i
+    return _DELIM_NAMES.get(t, "."), i + 1
+
+
+def _m_cmd(toks, i):
+    name = toks[i][1]
+    i += 1
+    if name in ("frac", "dfrac", "tfrac", "cfrac"):
+        a, i = _m_arg(toks, i)
+        b, i = _m_arg(toks, i)
+        return _m_frac(a, b), i
+    if name == "sqrt":
+        idx, i = _m_optarg(toks, i)
+        c, i = _m_arg(toks, i)
+        return _m_sqrt(_m_atom(idx) if idx else None, c), i
+    if name in ("binom", "dbinom", "tbinom"):
+        a, i = _m_arg(toks, i)
+        b, i = _m_arg(toks, i)
+        w = max(a.w, b.w)
+        return _m_wrap("(", _MBox(_m_center(a, w) + _m_center(b, w), a.h), ")"), i
+    if name == "left":
+        l, i = _m_delim(toks, i)
+        inner, i = _m_parse(toks, i, (("cmd", "right"),))
+        r = "."
+        if i < len(toks) and toks[i] == ("cmd", "right"):
+            i += 1
+            r, i = _m_delim(toks, i)
+        inner.base = (inner.h - 1) // 2 if inner.h > 1 else 0
+        return _m_wrap(l, inner, r), i
+    if name in ("right", "middle"):
+        _, i = _m_delim(toks, i)  # stray closer - drop its delimiter
+        return _m_atom(""), i
+    if name in ("bigl", "bigr", "Bigl", "Bigr", "biggl", "biggr", "Biggl",
+                "Biggr", "big", "Big", "bigg", "Bigg", "bigl", "bigr"):
+        ch, i = _m_delim(toks, i)
+        return _m_atom(_FLAT_DELIM.get(ch, ch)), i
+    if name in _BIGOPS or name in _INTS:
+        b = _MBox([_BIGOPS.get(name) or _INTS[name]], 0, big=True,
+                  side=name in _INTS)
+        return b, i
+    if name in _BIGLIM:
+        return _MBox([name], 0, big=True), i
+    if name in _FNAMES:
+        return _m_atom(name), i
+    if name in _TEXTFONTS:
+        g, i = _m_arg(toks, i)
+        return _m_atom(_m_lit(g)), i
+    if name == "mathbb":
+        g, i = _m_arg(toks, i)
+        return _m_atom("".join(BB.get(c, c) for c in _m_lit(g))), i
+    if name in ACCENTS or name in ("overline", "underline", "overbar"):
+        g, i = _m_arg(toks, i)
+        return _m_accent(name, g), i
+    if name in ("overset", "stackrel", "underset"):
+        a, i = _m_arg(toks, i)
+        b, i = _m_arg(toks, i)
+        w = max(a.w, b.w) + 2
+        if name == "underset":
+            return _MBox(_m_center(b, w) + _m_center(a, w), b.h - 1), i
+        top = _m_center(a, w)
+        return _MBox(top + _m_center(b, w), len(top)), i
+    if name in ("overbrace", "underbrace"):
+        g, i = _m_arg(toks, i)
+        w = g.w
+        if name == "overbrace":
+            return _MBox(["⏞" * w] + _m_center(g, w), g.h), i
+        return _MBox(_m_center(g, w) + ["⏟" * w], g.base), i
+    if name in ("xrightarrow", "xleftarrow"):
+        opt, i = _m_optarg(toks, i)
+        sup, i = _m_arg(toks, i)
+        return _m_arrow(name, _m_atom(opt) if opt else None, sup), i
+    if name in ("pmod", "mod"):
+        g, i = _m_arg(toks, i)
+        return _m_atom("(mod " + _m_lit(g) + ")"), i
+    if name == "boxed":
+        g, i = _m_arg(toks, i)
+        w = g.w + 2
+        rows = ["┌" + "─" * w + "┐"]
+        for l in g.lines:
+            rows.append("│ " + _m_pad(l, g.w) + " │")
+        rows.append("└" + "─" * w + "┘")
+        return _MBox(rows, g.base + 1), i
+    if name == "substack":
+        g, i = _m_arg(toks, i)
+        return g, i
+    if name == "not":
+        g, i = _m_arg(toks, i)
+        lit = _m_lit(g)
+        return _m_atom(lit[:1] + "̸" + lit[1:] if lit else "̸"), i
+    if name in _SPACES:
+        return _m_atom(_SPACES[name]), i
+    if name in _SKIPARG:
+        if name in ("kern", "hspace", "vspace", "mkern", "mspace", "rule",
+                    "raisebox", "phantom", "hphantom", "vphantom", "mathclap",
+                    "mathllap", "mathrlap", "clap", "llap", "rlap", "smash",
+                    "lefteqn", "color", "textcolor", "colorbox", "fcolorbox",
+                    "tag", "label", "eqref", "ref", "pageref", "cline",
+                    "intertext", "shortintertext", "ensuremath"):
+            _, i = _m_optarg(toks, i)
+            _, i = _m_arg(toks, i)
+            if name in ("textcolor", "fcolorbox"):
+                _, i = _m_arg(toks, i)
+            if name in ("color",):
+                _, i = _m_arg(toks, i)
+        return _m_atom(""), i
+    if name in GREEK:
+        return _m_atom(GREEK[name]), i
+    if name in OPS:
+        return _m_atom(OPS[name]), i
+    if name in ("{", "}"):
+        return _m_atom(name), i
+    if name == "|":
+        return _m_atom("‖"), i
+    if name == "'":
+        return _m_atom("′"), i
+    return _m_atom(name), i
+
+
+_ENVS = {"pmatrix": ("(", ")"), "bmatrix": ("[", "]"), "Bmatrix": ("{", "}"),
+         "vmatrix": ("|", "|"), "Vmatrix": ("‖", "‖"), "matrix": (".", "."),
+         "smallmatrix": ("(", ")"), "cases": ("{", "."), "rcases": (".", "}"),
+         "dcases": ("{", "."), "aligned": (".", "."), "align": (".", "."),
+         "array": (".", "."), "gathered": (".", "."), "split": (".", "."),
+         "eqnarray": (".", "."), "multlined": (".", "."), "bmod": (".", ".")}
+
+
+def _m_env(toks, i):
+    env = toks[i][1]
+    i += 1
+    if env == "array" and i < len(toks) and toks[i] == "{":
+        _, i = _m_group(toks, i)  # column spec {cc} - not typeset
+    rows, depth = [[]], 1
+    while i < len(toks) and depth:
+        t = toks[i]
+        if isinstance(t, tuple) and t[0] == "begin":
+            depth += 1
+        elif isinstance(t, tuple) and t[0] == "end":
+            depth -= 1
+            if depth == 0:
+                i += 1
+                break
+        if depth and t == "\\\\":
+            rows.append([])
+            i += 1
+            continue
+        if depth:
+            rows[-1].append(t)
+            i += 1
+    grid = []
+    for r in rows:
+        cells = [[]]
+        for t in r:
+            if t == "&":
+                cells.append([])
+            else:
+                cells[-1].append(t)
+        grid.append([_m_parse(c, 0)[0] for c in cells])
+    grid = [r for r in grid if any(c.h and any(l.strip() for l in c.lines) for c in r)]
+    if not grid:
+        return _m_atom(""), i
+    ncols = max(len(r) for r in grid)
+    for r in grid:
+        r += [_m_atom("")] * (ncols - len(r))
+    colw = [max(r[ci].w for r in grid) for ci in range(ncols)]
+    rightish = env in ("aligned", "align", "split", "eqnarray")
+    leftish = env in ("cases", "dcases", "array", "multlined")
+
+    def align(seg, ci):
+        sw = sum(_disp_w(x) for x in seg)
+        if rightish and ci % 2 == 0 and ci + 1 < ncols:
+            return " " * max(0, colw[ci] - sw) + seg
+        if leftish:
+            return _m_pad(seg, colw[ci])
+        left = max(0, (colw[ci] - sw) // 2)
+        return " " * left + _m_pad(seg, colw[ci] - left)
+
+    outlines, base_row = [], 0
+    for ri, r in enumerate(grid):
+        base = max(c.base for c in r)
+        h = base + max(c.h - c.base for c in r)
+        if ri == (len(grid) - 1) // 2:
+            base_row = len(outlines) + base
+        for rr in range(h):
+            line = ""
+            for ci, c in enumerate(r):
+                k = rr - (base - c.base)
+                seg = c.lines[k] if 0 <= k < c.h else ""
+                line += align(seg, ci) + ("  " if ci < ncols - 1 else "")
+            outlines.append(line.rstrip())
+    inner = _MBox(outlines, base_row)
+    l, r = _ENVS.get(env, (".", "."))
+    return _m_wrap(l, inner, r), i
+
+
+def math_2d(latex):
+    """Typeset LaTeX math as text rows; None when unparseable/empty."""
+    try:
+        box, _ = _m_parse(_m_toks(latex), 0)
+        if not box.h or not any(l.strip() for l in box.lines):
+            return None
+        return box.lines
+    except Exception:
+        return None
 
 
 def math_unicode(s):
@@ -192,6 +746,8 @@ def math_unicode(s):
     s = re.sub(r"\\(?:" + "|".join(FONTS) + r")\s*\{([^{}]*)\}", r"\1", s)
     s = re.sub(r"\\(?:" + "|".join(FONTS) + r")\s+(\w)", r"\1", s)
     s = _accent(s)
+    s = re.sub(r"\\boxed\s*\{([^{}]*)\}", r"⟦ \1 ⟧", s)
+    s = re.sub(r"\\binom\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r"C(\1,\2)", s)
     s = re.sub(r"\\(sum|prod|int|iint|iiint|oint|coprod|bigcup|bigcap|bigoplus|bigotimes)_\{([^{}]*)\}\^\{([^{}]*)\}",
                lambda m: OPS.get(m.group(1), m.group(1)) + "_" + m.group(2).translate(SUB) + "^" + m.group(3).translate(SUP), s)
     s = re.sub(r"\\(left|right|bigl|bigr|Bigl|Bigr|bigg|Bigg|big|Big|limits|displaystyle|quad|qquad|,|;|!| )", " ", s)
@@ -202,96 +758,6 @@ def math_unicode(s):
     s = re.sub(r"_([A-Za-z0-9+\-=()])", lambda m: m.group(1).translate(SUB), s)
     s = s.replace("{", "").replace("}", "").replace("\\", " ").replace("~", " ")
     return re.sub(r" {2,}", " ", s).strip()
-
-
-_TEX_DOC = (r"\documentclass{article}\usepackage{amsmath,amssymb,mathtools}"
-            r"\pagestyle{empty}\begin{document}$%s$\end{document}")
-_XETEX_DOC = (r"\documentclass{article}\usepackage{amsmath,amssymb,mathtools}"
-             r"\usepackage{xeCJK}\pagestyle{empty}\begin{document}$%s$\end{document}")
-_CJK = re.compile(r"[一-鿿　-〿＀-￯]")
-
-
-def _math_png_xelatex(latex, out_path):
-    """xelatex + xeCJK + pdftocairo: same quality as latex/dvipng but with
-    CJK glyph support for \text{中文} inside formulas."""
-    xe, cairo = shutil.which("xelatex"), shutil.which("pdftocairo")
-    if not (xe and cairo):
-        return False
-    tmpdir = out_path + ".xetex.d"
-    try:
-        os.makedirs(tmpdir, exist_ok=True)
-        with open(os.path.join(tmpdir, "m.tex"), "w", encoding="utf-8") as f:
-            f.write(_XETEX_DOC % latex)
-        r = subprocess.run([xe, "-interaction=nonstopmode", "-halt-on-error", "m.tex"],
-                           cwd=tmpdir, capture_output=True, timeout=60,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        pdf = os.path.join(tmpdir, "m.pdf")
-        if r.returncode != 0 or not os.path.exists(pdf):
-            return False
-        prefix = os.path.abspath(out_path)
-        if prefix.lower().endswith(".png"):
-            prefix = prefix[:-4]
-        r = subprocess.run([cairo, "-png", "-transp", "-r", "220", "-singlefile",
-                            os.path.abspath(pdf), prefix],
-                           cwd=tmpdir, capture_output=True, timeout=30,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return r.returncode == 0 and os.path.exists(out_path)
-    except Exception:
-        return False
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def _math_png_latex(latex, out_path):
-    """Real LaTeX → dvipng (full amsmath incl. environments); transparent bg."""
-    latex_exe, dvipng = shutil.which("latex"), shutil.which("dvipng")
-    if not (latex_exe and dvipng):
-        return False
-    tmpdir = out_path + ".tex.d"
-    try:
-        os.makedirs(tmpdir, exist_ok=True)
-        tex_path = os.path.join(tmpdir, "m.tex")
-        with open(tex_path, "w", encoding="utf-8") as f:
-            f.write(_TEX_DOC % latex)
-        r = subprocess.run([latex_exe, "-interaction=nonstopmode", "-halt-on-error", "m.tex"],
-                           cwd=tmpdir, capture_output=True, timeout=30,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        dvi = os.path.join(tmpdir, "m.dvi")
-        if r.returncode != 0 or not os.path.exists(dvi):
-            return False
-        r = subprocess.run([dvipng, "-T", "tight", "-D", "220", "-bg", "Transparent",
-                            "-fg", "rgb 1 1 1", "-o", os.path.abspath(out_path),
-                            os.path.abspath(dvi)],
-                           cwd=tmpdir, capture_output=True, timeout=30,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return r.returncode == 0 and os.path.exists(out_path)
-    except Exception:
-        return False
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def math_png(latex, out_path):
-    if os.path.exists(out_path):
-        return True
-    if _CJK.search(latex):
-        if _math_png_xelatex(latex, out_path):
-            return True
-    if _math_png_latex(latex, out_path):
-        return True
-    if _math_png_xelatex(latex, out_path):
-        return True
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        fig = plt.figure(figsize=(0.1, 0.1))
-        fig.text(0, 0, f"${latex}$", fontsize=14, color="white")
-        fig.savefig(out_path, dpi=200, transparent=True, bbox_inches="tight", pad_inches=0.05)
-        plt.close(fig)
-        return os.path.exists(out_path)
-    except Exception:
-        return False
 
 
 def mmdc_png(src, out_path):
@@ -561,8 +1027,11 @@ def render(md_path, cache_base, max_width=0, max_height=0):
             if len(s) > 2 and s.startswith("$") and s.endswith("$") and \
                     re.search(r"\\(begin|end)\b", s):
                 flush()
-                emit_media(queue_png("math", s[1:-1]), None,
-                           fallback=re.sub(r"\s+", " ", s[1:-1]).strip())
+                rows = math_2d(s[1:-1])
+                if rows:
+                    emit_pre(["    " + l for l in rows])
+                else:
+                    buf += math_unicode(s[1:-1])
             else:
                 buf += s
         flush()
@@ -615,13 +1084,14 @@ def render(md_path, cache_base, max_width=0, max_height=0):
                 j += 1
                 body += "\n" + lines[j]
             latex = body.rstrip().removesuffix("$$").strip()
-            uni = math_unicode(latex) if latex else ""
-            degrade = re.search(r"\\(begin|text|operatorname|hat|vec|overline|underline|underbrace|overbrace|bar|tilde|dot|ddot|stackrel|xrightarrow|xleftarrow|overset|underset|binom|mod|bmod|boxed|color|tag|label|lefteqn|displaylines|substack|mathclap|intertext|shortintertext)", latex or "")
-            if uni and not degrade:
-                out.append("    " + ITAL + uni + RESET)
-            elif latex:
-                emit_media(queue_png("math", latex), None,
-                           fallback=re.sub(r"\s+", " ", latex).strip())
+            rows = math_2d(latex) if latex else None
+            if rows and (not max_width or
+                         max(sum(_disp_w(c) for c in l) for l in rows) <= max_width):
+                emit_pre(["    " + l for l in rows])
+            else:
+                uni = math_unicode(latex) if latex else ""
+                out.append("    " + (ITAL + uni + RESET if uni
+                                     else DIM + re.sub(r"\s+", " ", latex).strip() + RESET))
             i = j + 1
             continue
         if st.startswith("|") and "|" in st[1:]:
@@ -687,8 +1157,7 @@ def render(md_path, cache_base, max_width=0, max_height=0):
             if os.path.exists(path):
                 return
             try:
-                {"mermaid": mmdc_png, "plantuml": plantuml_png,
-                 "math": math_png}[kind](src, path)
+                {"mermaid": mmdc_png, "plantuml": plantuml_png}[kind](src, path)
             except Exception:
                 pass
 
