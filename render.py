@@ -261,19 +261,46 @@ def export_via_ppt(app, source, entry):
 
 
 def export_via_word(app, source, entry):
+    """DOCX → PDF in two stages: ComputeStatistics forces pagination, then
+    pages 1-3 go to head.pdf so page 0 is usable immediately; tail() exports
+    the whole document to document.pdf after the reply is sent. Documents
+    of <=3 pages skip the head stage."""
     document = app.Documents.Open(
         FileName=str(source), ConfirmConversions=False, ReadOnly=True,
         AddToRecentFiles=False, PasswordDocument="", WritePasswordDocument="",
         Visible=False, OpenAndRepair=False, NoEncodingDialog=True,
     )
     try:
+        pages = document.ComputeStatistics(2)  # wdStatisticPages
+        if pages <= 3:
+            document.ExportAsFixedFormat(
+                OutputFileName=str(entry / "document.pdf"), ExportFormat=17,
+                OpenAfterExport=False, OptimizeFor=1, IncludeDocProps=False,
+            )
+            document.Close(SaveChanges=0)
+            return {"pages": pages}, None
         document.ExportAsFixedFormat(
-            OutputFileName=str(entry / "document.pdf"), ExportFormat=17,
+            OutputFileName=str(entry / "head.pdf"), ExportFormat=17,
             OpenAfterExport=False, OptimizeFor=1, IncludeDocProps=False,
+            Range=3, From=1, To=3,  # wdExportFromTo
         )
-        return {"pages": document.ComputeStatistics(2)}
-    finally:
-        document.Close(SaveChanges=0)
+
+        def tail():
+            try:
+                document.ExportAsFixedFormat(
+                    OutputFileName=str(entry / "document.pdf"), ExportFormat=17,
+                    OpenAfterExport=False, OptimizeFor=1, IncludeDocProps=False,
+                )
+            finally:
+                document.Close(SaveChanges=0)
+
+        return {"pages": pages, "head": 3}, tail
+    except Exception:
+        try:
+            document.Close(SaveChanges=0)
+        except Exception:
+            pass
+        raise
 
 
 def export_office(source, entry):
@@ -287,11 +314,13 @@ def export_office(source, entry):
         if kind == "ppt":
             app, pid, created = start_powerpoint()
             owned = pid is not None
-            metadata = export_via_ppt(app, source, entry)
+            metadata, tail = export_via_ppt(app, source, entry)
         else:
             app, pid, created = start_word()
-            metadata = export_via_word(app, source, entry)
+            metadata, tail = export_via_word(app, source, entry)
         (entry / "owner.json").write_text(json.dumps({"pid": pid or 0, "created": created or 0}), encoding="utf-8")
+        if tail is not None:
+            tail()
         print(json.dumps(metadata), flush=True)
     finally:
         try:
@@ -431,7 +460,7 @@ def export_via_server(source, entry, timeout, kind="word"):
         conn.close()
     if not reply.get("ok"):
         raise RuntimeError(reply.get("error", "Word conversion failed"))
-    return {"pages": reply["pages"], "png": reply.get("png")}
+    return {"pages": reply["pages"], "png": reply.get("png"), "head": reply.get("head")}
 
 
 def serve():
@@ -529,7 +558,7 @@ def serve():
                         if kind == "ppt":
                             meta, tail = export_via_ppt(app, Path(request["source"]), Path(request["entry"]))
                         else:
-                            meta = export_via_word(app, Path(request["source"]), Path(request["entry"]))
+                            meta, tail = export_via_word(app, Path(request["source"]), Path(request["entry"]))
                         break
                     except Exception:
                         # Dead COM handle (killed/crashed app) is unrecoverable:
@@ -691,7 +720,6 @@ def render(source, page, edge, probe=False, lock_timeout=None):
                     json.dumps({"url": str(source), "pages": metadata["pages"]}), encoding="utf-8")
             except Exception:
                 pass
-            pdf = source if is_pdf else entry / "document.pdf"
             page = max(0, min(page, metadata["pages"] - 1))
             if metadata.get("png"):
                 # PPT path: slide 1..3 arrive first; the rest are still being
@@ -704,6 +732,18 @@ def render(source, page, edge, probe=False, lock_timeout=None):
                     raise RuntimeError(f"slide image missing: {image.name}")
                 os.utime(image, None)
             else:
+                # DOCX path: while the server tail is still writing the full
+                # document.pdf, head.pdf covers pages 0..head-1; deeper pages
+                # briefly poll for the full export before giving up.
+                pdf = source if is_pdf else entry / "document.pdf"
+                if not is_pdf and not pdf.exists():
+                    head = metadata.get("head") or 0
+                    if page >= head:
+                        deadline = time.monotonic() + 15
+                        while not pdf.exists() and time.monotonic() < deadline:
+                            time.sleep(0.2)
+                    if not pdf.exists():
+                        pdf = entry / "head.pdf"
                 targets = {page, page + 1} | ({0, 1, 2} if converted else set())
                 for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
                     try:

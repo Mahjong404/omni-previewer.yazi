@@ -114,8 +114,23 @@ OPS = {"sum": "Σ", "prod": "Π", "int": "∫", "iint": "∬", "iiint": "∭", "
        "uparrow": "↑", "downarrow": "↓", "oplus": "⊕", "ominus": "⊖", "otimes": "⊗",
        "perp": "⊥", "parallel": "∥", "angle": "∠", "degree": "°", "hbar": "ℏ", "ell": "ℓ",
        "Re": "ℜ", "Im": "ℑ", "aleph": "ℵ", "wp": "℘", "ldots": "…", "cdots": "⋯",
-       "vdots": "⋮", "ddots": "⋱", "prime": "′", "therefore": "∴", "because": "∵"}
-SUP = str.maketrans("0123456789+-=()niabcedfghjklmoprtuvx", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱᵃᵇᶜᵉᵈᶠᵍʰʲᵏˡᵐᵒᵖʳᵗᵘᵛˣ")
+       "vdots": "⋮", "ddots": "⋱", "prime": "′", "therefore": "∴", "because": "∵",
+       "mid": "∣", "iff": "⟺", "implies": "⟹", "impliedby": "⟸", "nmid": "∤"}
+# TeX puts thick space around relations and medium space around binary ops
+# regardless of source spacing; atoms for these carry their own padding.
+_REL = {"leq", "le", "geq", "ge", "neq", "ne", "equiv", "approx", "sim",
+        "simeq", "cong", "propto", "in", "notin", "ni", "subset", "supset",
+        "subseteq", "supseteq", "to", "rightarrow", "leftarrow", "Rightarrow",
+        "Leftarrow", "Leftrightarrow", "leftrightarrow", "iff", "implies",
+        "impliedby", "mapsto", "mid", "nmid", "parallel", "perp", "models",
+        "vdash", "dashv", "prec", "succ", "preceq", "succeq", "ll", "gg",
+        "asymp", "doteq", "approxeq"}
+_BINOPS = {"pm", "mp", "times", "div", "cdot", "cup", "cap", "setminus",
+           "oplus", "ominus", "otimes", "odot", "uplus", "sqcap", "sqcup",
+           "vee", "wedge", "land", "lor", "ast", "star", "circ", "bullet",
+           "diamond", "wr", "amalg", "bigtriangleup", "bigtriangledown"}
+SUP = str.maketrans("0123456789+-=()niabcedfghjklmoprtuvxABDEGHIJKLMNOPRTUVW",
+                    "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱᵃᵇᶜᵉᵈᶠᵍʰʲᵏˡᵐᵒᵖʳᵗᵘᵛˣᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ")
 SUB = str.maketrans("0123456789+-=()aeoxhklmnpstijruv", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜᵢⱼᵣᵤᵥ")
 
 
@@ -163,7 +178,31 @@ def _frac_sqrt_pass(s):
 ACCENTS = {"hat": "̂", "bar": "̄", "overline": "̅", "vec": "⃗",
            "dot": "̇", "ddot": "̈", "tilde": "̃", "breve": "̆", "check": "̌",
            "overrightarrow": "⃗", "overleftarrow": "⃖",
-           "overleftrightarrow": "⃡"}
+           "overleftrightarrow": "⃡", "widetilde": "̃", "widehat": "̂"}
+
+
+def _mk_boldit():
+    """\\boldsymbol → math bold-italic glyphs (𝒙, 𝜶). SMP chars; if the
+    terminal font lacks them, revert the _m_cmd branch to _m_atom(_m_lit(g))."""
+    m = {}
+    for i in range(26):
+        m[chr(ord("A") + i)] = chr(0x1D468 + i)
+        m[chr(ord("a") + i)] = chr(0x1D482 + i)
+    for i in range(10):
+        m[str(i)] = chr(0x1D7CE + i)
+    caps = "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"
+    lows = "αβγδεζηθικλμνξοπρςστυφχψω"
+    for i, ch in enumerate(caps):
+        m[ch] = chr(0x1D71C + i + (1 if i >= 17 else 0))  # skip ϴ slot
+    for i, ch in enumerate(lows):
+        m[ch] = chr(0x1D736 + i)
+    m.update({"ϵ": chr(0x1D750), "ϑ": chr(0x1D751), "ϰ": chr(0x1D752),
+              "ϕ": chr(0x1D753), "ϱ": chr(0x1D754), "ϖ": chr(0x1D755),
+              "∂": chr(0x1D74F), "∇": chr(0x1D735)})
+    return {ord(k): v for k, v in m.items()}  # str.translate needs ordinal keys
+
+
+_BOLDIT = _mk_boldit()
 FONTS_BOLD = ("boldsymbol", "bm", "mathbf", "mathbfit", "pmb")
 FONTS = ("mathit", "mathrm", "mathsf", "mathtt", "mathcal", "mathfrak",
          "text", "operatorname")
@@ -241,7 +280,7 @@ def _m_frac(num, den):
     return _MBox(_m_center(num, w) + ["─" * w] + _m_center(den, w), num.h)
 
 
-SUP_CH = set("0123456789+-=()niabcedfghjklmoprtuvx")
+SUP_CH = set("0123456789+-=()niabcedfghjklmoprtuvxABDEGHIJKLMNOPRTUVW")
 SUB_CH = set("0123456789+-=()aeoxhklmnpstijruv")
 
 
@@ -339,6 +378,9 @@ def _m_wrap(l, inner, r):
 
 
 def _m_toks(s):
+    # TeX math mode ignores newlines and collapses whitespace runs; \\ is a
+    # separate row-break token and unaffected by this normalization.
+    s = re.sub(r"[ \t\n\r]+", " ", s)
     toks, i, n = [], 0, len(s)
     while i < n:
         c = s[i]
@@ -412,7 +454,7 @@ def _m_parse(toks, i, stops=()):
             cells.append(b)
             continue
         if t.strip():
-            cells.append(_m_atom(t))
+            cells.append(_m_atom(re.sub(r"\s*(<=|>=|<|>|=)\s*", r" \1 ", t)))
         i += 1
     return _m_hcat(cells), i
 
@@ -453,7 +495,7 @@ _FNAMES = {"log", "ln", "lg", "exp", "sin", "cos", "tan", "sec", "csc", "cot",
            "Hom", "End", "Aut", "Pr", "mod", "bmod", "gcd", "lcm", "min", "max"}
 _TEXTFONTS = {"text", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mbox",
               "hbox", "operatorname", "textbf", "textit", "textrm", "textnormal",
-              "textup", "boldsymbol", "bm", "pmb", "mathcal", "mathscr",
+              "textup", "mathcal", "mathscr",
               "mathfrak", "mathbfit", "displaystyle", "textstyle"}
 _SPACES = {",": " ", ";": " ", ":": " ", " ": " ", "quad": "  ", "qquad": "    ",
            "!": "", "enspace": " ", "thinspace": " ", "medspace": " ",
@@ -468,7 +510,7 @@ _SKIPARG = {"tag", "label", "nonumber", "notag", "eqref", "ref", "pageref",
             "vspace", "hspace", "raisebox", "displaylimits", "nolimits",
             "limits", "displaystyle", "scriptstyle", "scriptscriptstyle",
             "intertext", "shortintertext", "allowbreak", "numberwithin",
-            "ensuremath", "cr", "noalign", "mid", "relax"}
+            "ensuremath", "cr", "noalign", "relax"}
 
 
 def _m_lit(b):
@@ -567,9 +609,14 @@ def _m_cmd(toks, i):
                   side=name in _INTS)
         return b, i
     if name in _BIGLIM:
-        return _MBox([name], 0, big=True), i
+        pad = " " if i < len(toks) and toks[i] == "{" else ""
+        return _MBox([name + pad], 0, big=True), i
     if name in _FNAMES:
-        return _m_atom(name), i
+        pad = " " if i < len(toks) and toks[i] == "{" else ""
+        return _m_atom(name + pad), i
+    if name in ("boldsymbol", "bm", "pmb"):
+        g, i = _m_arg(toks, i)
+        return _MBox([l.translate(_BOLDIT) for l in g.lines], g.base), i
     if name in _TEXTFONTS:
         g, i = _m_arg(toks, i)
         return _m_atom(_m_lit(g)), i
@@ -634,7 +681,8 @@ def _m_cmd(toks, i):
     if name in GREEK:
         return _m_atom(GREEK[name]), i
     if name in OPS:
-        return _m_atom(OPS[name]), i
+        pad = " " if name in _REL or name in _BINOPS else ""
+        return _m_atom(pad + OPS[name] + pad), i
     if name in ("{", "}"):
         return _m_atom(name), i
     if name == "|":
@@ -667,7 +715,7 @@ def _m_env(toks, i):
             if depth == 0:
                 i += 1
                 break
-        if depth and t == "\\\\":
+        if depth and (t == "\\\\" or t == ("cmd", "cr")):
             rows.append([])
             i += 1
             continue
@@ -697,7 +745,7 @@ def _m_env(toks, i):
         sw = sum(_disp_w(x) for x in seg)
         if rightish and ci % 2 == 0 and ci + 1 < ncols:
             return " " * max(0, colw[ci] - sw) + seg
-        if leftish:
+        if leftish or rightish:
             return _m_pad(seg, colw[ci])
         left = max(0, (colw[ci] - sw) // 2)
         return " " * left + _m_pad(seg, colw[ci] - left)
@@ -723,15 +771,32 @@ def _m_env(toks, i):
 def math_2d(latex):
     """Typeset LaTeX math as text rows; None when unparseable/empty."""
     try:
-        box, _ = _m_parse(_m_toks(latex), 0)
-        if not box.h or not any(l.strip() for l in box.lines):
+        toks = _m_toks(latex)
+        segs, cur, depth = [], [], 0
+        for t in toks:
+            if isinstance(t, tuple) and t[0] == "begin":
+                depth += 1
+            elif isinstance(t, tuple) and t[0] == "end":
+                depth -= 1
+            if t == "\\\\" and depth == 0:
+                segs.append(cur)
+                cur = []
+            else:
+                cur.append(t)
+        segs.append(cur)
+        lines = []
+        for seg in segs:
+            b, _ = _m_parse(seg, 0)
+            lines += b.lines
+        if not lines or not any(l.strip() for l in lines):
             return None
-        return box.lines
+        return lines
     except Exception:
         return None
 
 
 def math_unicode(s):
+    s = s.replace("\\{", "\x01").replace("\\}", "\x02")
     prev = None
     while prev != s:
         prev = s
@@ -749,15 +814,37 @@ def math_unicode(s):
     s = re.sub(r"\\boxed\s*\{([^{}]*)\}", r"⟦ \1 ⟧", s)
     s = re.sub(r"\\binom\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r"C(\1,\2)", s)
     s = re.sub(r"\\(sum|prod|int|iint|iiint|oint|coprod|bigcup|bigcap|bigoplus|bigotimes)_\{([^{}]*)\}\^\{([^{}]*)\}",
-               lambda m: OPS.get(m.group(1), m.group(1)) + "_" + m.group(2).translate(SUB) + "^" + m.group(3).translate(SUP), s)
-    s = re.sub(r"\\(left|right|bigl|bigr|Bigl|Bigr|bigg|Bigg|big|Big|limits|displaystyle|quad|qquad|,|;|!| )", " ", s)
+               lambda m: OPS.get(m.group(1), m.group(1)) + m.group(2).translate(SUB) + m.group(3).translate(SUP), s)
+    s = re.sub(r"\\(?:left|right|bigl|bigr|Bigl|Bigr|bigg|Bigg|big|Big|limits|displaystyle|quad|qquad)\b", " ", s)
+    s = re.sub(r"\\[,;! ]", " ", s)
     s = re.sub(r"\\([A-Za-z]+)", lambda m: GREEK.get(m.group(1), OPS.get(m.group(1), m.group(1))), s)
-    s = re.sub(r"\^\{([^{}]*)\}", lambda m: "".join(ch.translate(SUP) for ch in m.group(1)), s)
-    s = re.sub(r"_\{([^{}]*)\}", lambda m: "".join(ch.translate(SUB) for ch in m.group(1)), s)
-    s = re.sub(r"\^([A-Za-z0-9+\-=()])", lambda m: m.group(1).translate(SUP), s)
-    s = re.sub(r"_([A-Za-z0-9+\-=()])", lambda m: m.group(1).translate(SUB), s)
+    def _sup_of(g):
+        return g.translate(SUP) if g and set(g) <= SUP_CH else "^(" + g + ")"
+    def _sub_of(g):
+        return g.translate(SUB) if g and set(g) <= SUB_CH else "_(" + g + ")"
+    s = re.sub(r"\^\{([^{}]*)\}", lambda m: _sup_of(m.group(1)), s)
+    s = re.sub(r"_\{([^{}]*)\}", lambda m: _sub_of(m.group(1)), s)
+    s = re.sub(r"\^([A-Za-z0-9+\-=()*])", lambda m: _sup_of(m.group(1)), s)
+    s = re.sub(r"_([A-Za-z0-9+\-=()])", lambda m: _sub_of(m.group(1)), s)
+    s = re.sub(r"\b(min|max|lim|sup|inf|det|ker|dim|deg|rank|gcd|arg|Pr|hom)\s*\{", r"\1 {", s)
     s = s.replace("{", "").replace("}", "").replace("\\", " ").replace("~", " ")
+    s = s.replace("\x01", "{").replace("\x02", "}")
     return re.sub(r" {2,}", " ", s).strip()
+
+
+def math_flat(s, multiline=False):
+    """Degrade math to flat text when the 2-D layout won't fit: environments
+    collapse to their delimiters, & → ' ', and \\ → '\\n' (blocks) or '; '
+    (inline contexts such as table cells where newlines are impossible)."""
+    def envdelim(m):
+        l, r = _ENVS.get(m.group(2), (".", "."))
+        return (l if m.group(1) == "begin" else r).replace(".", "")
+    s = re.sub(r"\\(begin|end)\s*\{([A-Za-z*]+)\}", envdelim, s)
+    s = re.sub(r"\\cr\b", "; ", s)
+    s = s.replace("\\\\", "\x03").replace("&", " ")
+    s = re.sub(r"[ \t\r\n]+", " ", s)
+    s = math_unicode(s)
+    return s.replace("\x03", "\n" if multiline else "; ")
 
 
 def mmdc_png(src, out_path):
@@ -918,7 +1005,7 @@ def render_inline(s):
         return TOK.format(len(spans) - 1)
 
     s = re.sub(r"`([^`]+)`", lambda m: keep(CODE + " " + m.group(1) + " " + RESET), s)
-    s = re.sub(r"\$([^$\n]+)\$", lambda m: keep(ITAL + (math_unicode(m.group(1)) if not re.search(r"\\(begin|end|matrix|cases|aligned|split)\b", m.group(1)) else m.group(1)) + RESET), s)
+    s = re.sub(r"\$([^$\n]+)\$", lambda m: keep(ITAL + (math_unicode(m.group(1)) if not re.search(r"\\(begin|end)\b", m.group(1)) else math_flat(m.group(1))) + RESET), s)
     s = re.sub(r"!\[([^\]]*)\]\(([^)]*)\)", lambda m: keep(DIM + "[image: " + (m.group(1) or m.group(2)) + "]" + RESET), s)
     s = re.sub(r"\[\[([^\]]+)\]\]", lambda m: keep(UND + CYAN + m.group(1) + RESET), s)
     s = re.sub(r"\[([^\]]+)\]\(([^)]*)\)", lambda m: keep(UND + CYAN + m.group(1) + RESET + DIM + "(" + m.group(2).strip() + ")" + RESET), s)
@@ -940,8 +1027,26 @@ def parse_table(lines, i, max_width=0):
         return None, i
 
     def cells_of(line):
+        # | inside $...$ is math (determinant/norm bars), not a cell boundary.
         inner = line.strip().strip("|")
-        return [re.sub(r"\\([\[\]|])", r"\1", c).strip() for c in inner.split("|")]
+        cells, cur, in_math = [], "", False
+        k = 0
+        while k < len(inner):
+            ch = inner[k]
+            if ch == "\\" and k + 1 < len(inner):
+                cur += inner[k:k + 2]
+                k += 2
+                continue
+            if ch == "$":
+                in_math = not in_math
+            if ch == "|" and not in_math:
+                cells.append(cur)
+                cur = ""
+            else:
+                cur += ch
+            k += 1
+        cells.append(cur)
+        return [re.sub(r"\\([\[\]|])", r"\1", c).strip() for c in cells]
 
     header = [render_inline(c) for c in cells_of(block[0])]
     data = [[render_inline(c) for c in cells_of(b)] for b in block[2:]]
@@ -952,12 +1057,13 @@ def parse_table(lines, i, max_width=0):
             natural[c] = max(natural[c], table.width(r[c]))
     dropped = 0
     if max_width:
-        # Drop rightmost columns that cannot fit; never emit an over-wide grid.
+        # Keep every column that fits at minimum width 4; grid_lines then
+        # shrinks+wraps cells into the remaining space. Only columns that
+        # truly cannot fit at all are dropped.
         keep, used = 0, 1
         for c in range(ncols):
-            w = min(max(natural[c], 4), table.CELL_MAX)
-            if used + w + 3 <= max_width:
-                used += w + 3
+            if used + 4 + 3 <= max_width:
+                used += 4 + 3
                 keep += 1
             else:
                 break
@@ -1077,21 +1183,30 @@ def render(md_path, cache_base, max_width=0, max_height=0):
             i = j + 1 if j < len(lines) else j
             continue
         st = line.strip()
-        if st.startswith("$$"):
+        qm = re.match(r"^\s*>\s?", line)
+        if st.startswith("$$") or (qm and qm.group(0) and
+                                   line[qm.end():].strip().startswith("$$")):
+            quote = DIM + "│ " + RESET if qm and not st.startswith("$$") else ""
             j = i
-            body = st[2:]
+            body = st[2:] if not quote else line[qm.end():].strip()[2:]
             while not body.rstrip().endswith("$$") and j + 1 < len(lines):
                 j += 1
-                body += "\n" + lines[j]
+                body += "\n" + (re.sub(r"^\s*>\s?", "", lines[j]) if quote
+                                else lines[j])
             latex = body.rstrip().removesuffix("$$").strip()
             rows = math_2d(latex) if latex else None
             if rows and (not max_width or
-                         max(sum(_disp_w(c) for c in l) for l in rows) <= max_width):
-                emit_pre(["    " + l for l in rows])
+                         max(sum(_disp_w(c) for c in l) for l in rows) <= max_width - 4):
+                emit_pre([quote + "    " + l for l in rows])
             else:
-                uni = math_unicode(latex) if latex else ""
-                out.append("    " + (ITAL + uni + RESET if uni
-                                     else DIM + re.sub(r"\s+", " ", latex).strip() + RESET))
+                uni = math_flat(latex, multiline=True) if latex else ""
+                for raw in uni.splitlines() or [""]:
+                    for l in wrap_ansi(raw, max(10, (max_width or 80) - 4)) or [""]:
+                        out.append(quote + "    " + (ITAL + l + RESET if uni
+                                   else DIM + l + RESET))
+                if not uni and latex:
+                    out.append(quote + "    " + DIM
+                               + re.sub(r"\s+", " ", latex).strip() + RESET)
             i = j + 1
             continue
         if st.startswith("|") and "|" in st[1:]:
