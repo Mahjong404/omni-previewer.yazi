@@ -14,6 +14,7 @@
 - `table.py` — ANSI grid renderer + text-table adapters (csv, docx tables).
 - `xlsx.py` — XLSX adapter (openpyxl, colors/merges).
 - `docx_text.py` — DOCX text extractor for text-mode preview.
+- `doc_text.py` — legacy OLE text extractor (.doc/.dot/.rtf) via the Word server's Content.Text.
 - `pptx_text.py` — PPTX slide-outline extractor (OOXML only) for text-mode/fallback preview.
 - `shell_thumb.py` — Windows Explorer thumbnail fast path (ctypes IThumbnailCache, cache-only).
 - `md.py` — Markdown renderer (headings/tables/code/math/diagrams), emits a `{text, media}` manifest.

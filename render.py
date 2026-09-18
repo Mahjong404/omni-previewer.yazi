@@ -1,3 +1,4 @@
+import collections
 import hashlib
 import json
 import msvcrt
@@ -33,14 +34,22 @@ class TransportError(Exception):
     pass
 
 
+class ServerBusy(TransportError):
+    """The server answered the connection but is saturated (queued behind a
+    tail or a long export). Distinct from a dead server: a busy server must
+    NOT trigger the --export fallback, which would spawn a competing COM
+    instance and snowball the congestion."""
+    pass
+
+
 class ProbeMiss(Exception):
     pass
 
 
 @contextmanager
-def cache_lock(timeout=TIMEOUT):
+def cache_lock(timeout=TIMEOUT, path=None):
     CACHE.mkdir(parents=True, exist_ok=True)
-    with (CACHE / ".lock").open("a+b") as handle:
+    with (path or (CACHE / ".lock")).open("a+b") as handle:
         if handle.tell() == 0:
             handle.write(b"0")
             handle.flush()
@@ -107,6 +116,37 @@ OFFICE_KIND = {
 
 def kind_of(source):
     return OFFICE_KIND.get(source.suffix.lower())
+
+
+PPT_OOXML = {ext for ext, kind in OFFICE_KIND.items()
+             if kind == "ppt" and ext not in (".ppt", ".pps", ".pot")}
+WORD_OOXML = {ext for ext, kind in OFFICE_KIND.items()
+              if kind == "word" and ext not in (".doc", ".dot", ".rtf")}
+
+
+def quick_pages(source):
+    """Page/slide count without conversion, for the early status hint.
+    PPTX slide count from the package is exact; DOCX app.xml <Pages> is
+    whatever Word last saved (approximate but better than nothing)."""
+    ext = source.suffix.lower()
+    try:
+        if ext == ".pdf":
+            return pdf_pages(source)
+        if ext in PPT_OOXML:
+            with zipfile.ZipFile(source) as z:
+                pres = z.read("ppt/presentation.xml").decode("utf-8", "replace")
+                count = len(re.findall(r"<p:sldId[ >]", pres))
+                if count:
+                    return count
+                return sum(1 for n in z.namelist()
+                           if n.startswith("ppt/slides/slide") and n.endswith(".xml"))
+        if ext in WORD_OOXML:
+            with zipfile.ZipFile(source) as z:
+                xml = z.read("docProps/app.xml").decode("utf-8", "replace")
+            m = re.search(r"<Pages>(\d+)</Pages>", xml)
+            return int(m.group(1)) if m else None
+    except Exception:
+        return None
 
 
 def validate_doc(source):
@@ -227,31 +267,28 @@ def export_via_ppt(app, source, entry):
             pass
 
         def tail():
+            # Generator: one slide per yield so the serve loop can interleave
+            # queued requests between slides instead of blocking on a bulk
+            # export. gen.close() on shutdown lands in this finally.
+            failed = False
             try:
-                out_dir = entry / "slides"
-                pres.Export(str(out_dir), "PNG", sw, sh)
-                for f in sorted(out_dir.iterdir()):
-                    m = re.search(r"(\d+)", f.stem)
-                    if not m:
-                        continue
-                    target = entry / f"page-{int(m.group(1)) - 1}.png"
-                    if target.exists():
-                        f.unlink(missing_ok=True)
-                    else:
-                        os.replace(f, target)
-                try:
-                    out_dir.rmdir()
-                except OSError:
-                    pass
-            except Exception:
-                try:
-                    pres.SaveAs(str(entry / "document.pdf"), 32)  # ppSaveAsPDF fallback
-                except Exception:
-                    pass
+                for i in range(1, count + 1):
+                    target = entry / f"page-{i - 1}.png"
+                    try:
+                        if not target.exists():
+                            pres.Slides(i).Export(str(target), "PNG", sw, sh)
+                    except Exception:
+                        failed = True
+                    yield
+                if failed:
+                    try:
+                        pres.SaveAs(str(entry / "document.pdf"), 32)  # ppSaveAsPDF fallback
+                    except Exception:
+                        pass
             finally:
                 pres.Close()
 
-        return {"pages": count, "png": True}, tail
+        return {"pages": count, "png": True}, tail()
     except Exception:
         try:
             pres.Close()
@@ -286,6 +323,7 @@ def export_via_word(app, source, entry):
         )
 
         def tail():
+            # Single-step generator (uniform with the PPT tail interface).
             try:
                 document.ExportAsFixedFormat(
                     OutputFileName=str(entry / "document.pdf"), ExportFormat=17,
@@ -293,14 +331,32 @@ def export_via_word(app, source, entry):
                 )
             finally:
                 document.Close(SaveChanges=0)
+            yield
 
-        return {"pages": pages, "head": 3}, tail
+        return {"pages": pages, "head": 3}, tail()
     except Exception:
         try:
             document.Close(SaveChanges=0)
         except Exception:
             pass
         raise
+
+
+def export_text(app, source):
+    """Whole-document text via Word COM: Content.Text is just the character
+    stream - no pagination or export needed, so it is much faster than the
+    PDF path (~1-2s on a warm instance). Serves legacy OLE formats (.doc,
+    .dot, .rtf) that have no OOXML fast path."""
+    document = app.Documents.Open(
+        FileName=str(source), ConfirmConversions=False, ReadOnly=True,
+        AddToRecentFiles=False, PasswordDocument="", WritePasswordDocument="",
+        Visible=False, OpenAndRepair=False, NoEncodingDialog=True,
+    )
+    try:
+        text = document.Content.Text
+    finally:
+        document.Close(SaveChanges=0)
+    return text[:2 * 1024 * 1024].replace("\r", "\n").replace("\x07", "\t")
 
 
 def export_office(source, entry):
@@ -320,7 +376,7 @@ def export_office(source, entry):
             metadata, tail = export_via_word(app, source, entry)
         (entry / "owner.json").write_text(json.dumps({"pid": pid or 0, "created": created or 0}), encoding="utf-8")
         if tail is not None:
-            tail()
+            collections.deque(tail, maxlen=0)  # tails are generators now
         print(json.dumps(metadata), flush=True)
     finally:
         try:
@@ -461,7 +517,10 @@ def sweep_stale_servers():
         pass
 
 
-def export_via_server(source, entry, timeout, kind="word"):
+def server_request(payload, timeout, spawn=True):
+    """One request on the preview pipe. TransportError = server unreachable
+    (a fresh --serve may be spawned once); ServerBusy = connected but the
+    reply did not arrive within timeout (the server is alive and queued)."""
     from multiprocessing.connection import Client
 
     deadline = time.monotonic() + CONNECT_TIMEOUT
@@ -470,7 +529,7 @@ def export_via_server(source, entry, timeout, kind="word"):
         try:
             conn = Client(PIPE_NAME, family="AF_PIPE")
         except (FileNotFoundError, OSError):
-            if not spawned:
+            if not spawned and spawn:
                 subprocess.Popen(
                     [sys.executable, "-X", "utf8", __file__, "--serve"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -482,20 +541,27 @@ def export_via_server(source, entry, timeout, kind="word"):
     if conn is None:
         raise TransportError("Word preview server did not start")
     try:
-        conn.send({"source": str(source), "entry": str(entry), "kind": kind})
+        conn.send(payload)
         if not conn.poll(timeout):
-            raise TransportError("Word preview server did not respond")
+            raise ServerBusy("Word preview server is busy")
         reply = conn.recv()
     except (EOFError, OSError) as exc:
         raise TransportError(str(exc))
     finally:
         conn.close()
     if not reply.get("ok"):
-        raise RuntimeError(reply.get("error", "Word conversion failed"))
+        raise RuntimeError(reply.get("error", "Word preview server error"))
+    return reply
+
+
+def export_via_server(source, entry, timeout, kind="word"):
+    reply = server_request(
+        {"source": str(source), "entry": str(entry), "kind": kind}, timeout)
     return {"pages": reply["pages"], "png": reply.get("png"), "head": reply.get("head")}
 
 
 def serve():
+    import queue
     import threading
 
     import psutil
@@ -568,12 +634,40 @@ def serve():
             pass
 
     threading.Thread(target=watchdog, daemon=True).start()
-    try:
+    # Requests queue up so the main loop can interleave them with pending
+    # tail generators: a new request is served between slide exports instead
+    # of waiting for the previous deck's tail to finish.
+    requests = queue.Queue()
+
+    def acceptor():
         while not stop.is_set():
             try:
                 conn = listener.accept()
             except OSError:
                 break
+            requests.put(conn)
+
+    threading.Thread(target=acceptor, daemon=True).start()
+    pending_tails = collections.deque()
+    try:
+        while not stop.is_set():
+            try:
+                conn = requests.get(timeout=0.5)
+            except queue.Empty:
+                conn = None
+            if conn is None:
+                # Idle slice: advance every pending tail one step, then block
+                # for the next request again.
+                for _ in range(len(pending_tails)):
+                    gen = pending_tails.popleft()
+                    try:
+                        next(gen)
+                        pending_tails.append(gen)
+                    except StopIteration:
+                        pass
+                    except Exception:
+                        pass
+                continue
             kind = None
             tail = None
             try:
@@ -583,6 +677,10 @@ def serve():
                 if request.get("warm"):
                     app_for(kind)
                     conn.send({"ok": True, "pages": 0})
+                    continue
+                if request.get("text"):
+                    conn.send({"ok": True, "text": export_text(
+                        app_for("word"), Path(request["source"]))})
                     continue
                 for attempt in (0, 1):
                     app = app_for(kind)
@@ -610,11 +708,13 @@ def serve():
             finally:
                 conn.close()
             if tail is not None:
-                try:
-                    tail()
-                except Exception:
-                    pass
+                pending_tails.append(tail)
     finally:
+        for gen in pending_tails:
+            try:
+                gen.close()  # lands in the tail's finally -> pres/document.Close
+            except Exception:
+                pass
         for kind, app in apps.items():
             try:
                 if owners.get(kind, (None, None, False))[2]:
@@ -698,9 +798,15 @@ def convert_to_pdf(source, entry, stat):
     timeout = max(30, min(120, stat.st_size // (2 * 1024 * 1024) + 15))
     try:
         return export_via_server(source, entry, timeout, kind)
+    except ServerBusy:
+        # The server is alive but queued behind another export/tail; spawning
+        # a competing COM instance via --export would only snowball the delay.
+        raise
     except TransportError:
         try:
             return export_via_server(source, entry, timeout, kind)
+        except ServerBusy:
+            raise
         except TransportError:
             try:
                 result = subprocess.run(
@@ -746,6 +852,23 @@ def embedded_thumb(source, entry):
         return None
 
 
+def write_pages_record(source, pages):
+    """Persist the total page count for the status bar. A single shared
+    .current.json races whenever another file's render/preload finishes -
+    each file therefore gets its own record keyed by a djb2 hash of the
+    (case-folded) url, mirroring the hash init.lua can recompute."""
+    url = str(source)
+    h = 5381
+    for b in url.encode("utf-8"):
+        o = b + 32 if 65 <= b <= 90 else b  # ASCII lower, matches Lua string.lower on bytes
+        h = ((h * 33) + o) & 0xFFFFFFFF
+    try:
+        (CACHE / f".pages-{h:08x}.json").write_text(json.dumps({"pages": pages}), encoding="utf-8")
+        (CACHE / ".current.json").write_text(json.dumps({"url": url, "pages": pages}), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def thumb_for(source, entry):
     """Fast preview image while conversion runs: embedded OOXML thumbnail
     first (real document content), then the Explorer shell cache (covers
@@ -771,20 +894,27 @@ def render(source, page, edge, probe=False, lock_timeout=None):
         # Fast path outside the cache lock: a conversion holds it for the
         # whole COM export, so probes must not wait on it just to answer
         # "not ready yet". Serve a thumbnail instead when one exists.
+        pages_hint = quick_pages(source)
+        if pages_hint:
+            write_pages_record(source, pages_hint)
         if (entry / "failed").exists():
             raise ProbeMiss("PREVFAILED: conversion previously failed")
         thumb = thumb_for(source, entry)
         if thumb:
             return {"thumb": str(thumb), "dir": str(entry), "page": 0,
-                    "probe_thumb": True}
+                    "pages": pages_hint or 0, "probe_thumb": True}
         raise ProbeMiss("Document is not converted yet")
     wait = PROBE_TIMEOUT if probe else (lock_timeout if lock_timeout is not None else TIMEOUT)
     with cache_lock(wait):
         prune(entry)
         sweep_stale_servers()
+    # Per-entry lock: conversion serializes only against same-file workers;
+    # other files proceed in parallel. Page waits and rasterization below run
+    # entirely outside any lock - a slow slide export must not stall them.
+    with cache_lock(wait, CACHE / f"{key}.lock"):
+        manifest = entry / "metadata.json"
+        converted = not manifest.exists()
         try:
-            manifest = entry / "metadata.json"
-            converted = not manifest.exists()
             if converted and probe:
                 if (entry / "failed").exists():
                     raise ProbeMiss("PREVFAILED: conversion previously failed")
@@ -799,51 +929,8 @@ def render(source, page, edge, probe=False, lock_timeout=None):
                 manifest.write_text(json.dumps(metadata), encoding="utf-8")
                 (entry / "failed").unlink(missing_ok=True)
             metadata = json.loads(manifest.read_text(encoding="utf-8"))
-            try:
-                (CACHE / ".current.json").write_text(
-                    json.dumps({"url": str(source), "pages": metadata["pages"]}), encoding="utf-8")
-            except Exception:
-                pass
+            write_pages_record(source, metadata["pages"])
             page = max(0, min(page, metadata["pages"] - 1))
-            if metadata.get("png"):
-                # PPT path: slide 1..3 arrive first; the rest are still being
-                # exported in the server tail - poll briefly before giving up.
-                image = entry / f"page-{page}.png"
-                deadline = time.monotonic() + 15
-                while not image.exists() and time.monotonic() < deadline:
-                    time.sleep(0.2)
-                if not image.exists():
-                    raise RuntimeError(f"slide image missing: {image.name}")
-                os.utime(image, None)
-            else:
-                # DOCX path: while the server tail is still writing the full
-                # document.pdf, head.pdf covers pages 0..head-1; deeper pages
-                # briefly poll for the full export before giving up.
-                pdf = source if is_pdf else entry / "document.pdf"
-                if not is_pdf and not pdf.exists():
-                    head = metadata.get("head") or 0
-                    if page >= head:
-                        deadline = time.monotonic() + 15
-                        while not pdf.exists() and time.monotonic() < deadline:
-                            time.sleep(0.2)
-                    if not pdf.exists():
-                        pdf = entry / "head.pdf"
-                targets = {page, page + 1} | ({0, 1, 2} if converted else set())
-                for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
-                    try:
-                        render_page(entry, target, edge, pdf)
-                    except Exception:
-                        pass
-                image = render_page(entry, page, edge, pdf)
-                os.utime(image, None)
-            pages = sorted(entry.glob("page-*.jpg"), key=lambda f: f.stat().st_mtime, reverse=True)
-            for obsolete in pages[50:]:
-                obsolete.unlink()
-            os.utime(entry, None)
-            prune(entry)
-            return {"image": str(image), "dir": str(entry), "edge": edge,
-                    "page": page, "pages": metadata["pages"], "png": bool(metadata.get("png")),
-                    "cached": not converted, "converted": converted}
         except Exception as exc:
             if not probe:
                 shutil.rmtree(entry, ignore_errors=True)
@@ -853,6 +940,44 @@ def render(source, page, edge, probe=False, lock_timeout=None):
                 except Exception:
                     pass
             raise
+    if metadata.get("png"):
+        # PPT path: slide 1..3 arrive first; the rest are still being
+        # exported in the server tail - poll briefly before giving up.
+        image = entry / f"page-{page}.png"
+        deadline = time.monotonic() + 15
+        while not image.exists() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if not image.exists():
+            raise RuntimeError(f"slide image missing: {image.name}")
+        os.utime(image, None)
+    else:
+        # DOCX path: while the server tail is still writing the full
+        # document.pdf, head.pdf covers pages 0..head-1; deeper pages
+        # briefly poll for the full export before giving up.
+        pdf = source if is_pdf else entry / "document.pdf"
+        if not is_pdf and not pdf.exists():
+            head = metadata.get("head") or 0
+            if page >= head:
+                deadline = time.monotonic() + 15
+                while not pdf.exists() and time.monotonic() < deadline:
+                    time.sleep(0.2)
+            if not pdf.exists():
+                pdf = entry / "head.pdf"
+        targets = {page, page + 1} | ({0, 1, 2} if converted else set())
+        for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
+            try:
+                render_page(entry, target, edge, pdf)
+            except Exception:
+                pass
+        image = render_page(entry, page, edge, pdf)
+        os.utime(image, None)
+    pages = sorted(entry.glob("page-*.jpg"), key=lambda f: f.stat().st_mtime, reverse=True)
+    for obsolete in pages[50:]:
+        obsolete.unlink()
+    os.utime(entry, None)
+    return {"image": str(image), "dir": str(entry), "edge": edge,
+            "page": page, "pages": metadata["pages"], "png": bool(metadata.get("png")),
+            "cached": not converted, "converted": converted}
 
 
 def notify(url, page):

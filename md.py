@@ -1051,33 +1051,10 @@ def parse_table(lines, i, max_width=0):
     header = [render_inline(c) for c in cells_of(block[0])]
     data = [[render_inline(c) for c in cells_of(b)] for b in block[2:]]
     ncols = len(header)
-    natural = [0] * ncols
-    for r in [header] + data:
-        for c in range(min(ncols, len(r))):
-            natural[c] = max(natural[c], table.width(r[c]))
-    dropped = 0
-    if max_width:
-        # Keep every column that fits at minimum width 4; grid_lines then
-        # shrinks+wraps cells into the remaining space. Only columns that
-        # truly cannot fit at all are dropped.
-        keep, used = 0, 1
-        for c in range(ncols):
-            if used + 4 + 3 <= max_width:
-                used += 4 + 3
-                keep += 1
-            else:
-                break
-        if keep < ncols:
-            dropped = ncols - max(keep, 1)
-            keep = max(keep, 1)
-            header, ncols = header[:keep], keep
-            data = [r[:keep] for r in data]
-            natural = natural[:keep]
     grid = [(header, [1] * ncols)]
     grid += [(r, [1] * len(r)) for r in data]
+    # grid_lines drops right columns that cannot fully display (with a note).
     out = table.grid_lines(grid, header=True, max_width=max_width, rowsep=True).splitlines()
-    if dropped:
-        out.append(DIM + f"  ⋯ {dropped} column(s) hidden — pane too narrow" + RESET)
     return out, j
 
 

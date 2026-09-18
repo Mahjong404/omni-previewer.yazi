@@ -95,6 +95,24 @@ def _grid_body(rows, header=None, max_width=0, rowsep=False):
             if span == 1 and c < ncols:
                 colw[c] = min(max(colw[c], width(text)), CELL_MAX)
             c += span
+    dropped = 0
+    if max_width:
+        # Keep the leftmost run of columns that fit at natural width; a
+        # column whose content cannot fully display is dropped with a note
+        # rather than squeezed into an unreadable strip.
+        keep, used = 0, 1
+        for c in range(ncols):
+            if used + colw[c] + 3 <= max_width:
+                used += colw[c] + 3
+                keep += 1
+            else:
+                break
+        if keep < ncols:
+            dropped = ncols - max(keep, 1)
+            ncols = max(keep, 1)
+    if dropped:
+        colw = colw[:ncols]
+        rows = [_trim_row(cells, spans, ncols) for cells, spans in rows]
     avail = max_width - 3 * ncols - 1
     if max_width and sum(colw) > avail:
         while sum(colw) > max(avail, 4 * ncols):
@@ -131,6 +149,20 @@ def _grid_body(rows, header=None, max_width=0, rowsep=False):
         elif rowsep and ri < len(rows) - 1:
             border("├", "┼", "┤")
     border("└", "┴", "┘")
+    if dropped:
+        print(DIM + f"  ⋯ {dropped} column(s) hidden — pane too narrow" + RESET)
+
+
+def _trim_row(cells, spans, keep):
+    """Drop cells beyond column `keep`; clip a span crossing the boundary."""
+    out_c, out_s, c = [], [], 0
+    for text, span in zip(cells, spans):
+        if c >= keep:
+            break
+        out_c.append(text)
+        out_s.append(min(span, keep - c))
+        c += span
+    return out_c, out_s
 
 
 def csv_rows(path):

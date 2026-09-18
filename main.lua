@@ -67,7 +67,7 @@ end)
 local toggle = ya.sync(function(state)
 	local hovered = cx.active.current.hovered
 	local ext = hovered and ext_of(hovered.url) or ""
-	if not (hovered and (WORD_EXTS[ext] or ext == "md" or ext == "markdown")) then
+	if not (hovered and (WORD_EXTS[ext] or PPT_EXTS[ext] or ext == "md" or ext == "markdown")) then
 		return nil
 	end
 	state.text_mode = not state.text_mode
@@ -172,7 +172,7 @@ local function script_peek(job, script)
 	return text
 end
 
-local function word_fallback(job)
+local function word_fallback(job, deep)
 	local ext = ext_of(job.file.url)
 	if ext == "docx" then
 		local text = script_peek(job, "docx_text.py")
@@ -180,6 +180,15 @@ local function word_fallback(job)
 			return ansi_peek(job, text)
 		end
 		return require("docx-preview"):peek(job)
+	end
+	if deep and WORD_EXTS[ext] then
+		-- Legacy OLE Word formats: text comes from the persistent server
+		-- (Word Content.Text), no OOXML fast path exists for them. Only
+		-- used in explicit text mode - too expensive as a pending filler.
+		local text = script_peek(job, "doc_text.py")
+		if text then
+			return ansi_peek(job, text)
+		end
 	end
 	if PPT_EXTS[ext] then
 		local text = script_peek(job, "pptx_text.py")
@@ -228,7 +237,7 @@ local function word_peek(job)
 	local key = identity(job)
 	local text_mode, failed, info, pending = state_get(key)
 	if text_mode then
-		return word_fallback(job)
+		return word_fallback(job, true)
 	end
 	if failed then
 		-- Transient conversion failures used to stick for the whole session:
@@ -238,7 +247,7 @@ local function word_peek(job)
 			state_retry_arm(key)
 			spawn_worker(job)
 		end
-		return word_fallback(job)
+		return word_fallback(job, true)
 	end
 
 	local edge = pane_edge(job)
@@ -416,7 +425,7 @@ function M:entry(job)
 	if text_mode == nil then
 		return
 	end
-	ya.notify({ title = "Word preview", content = text_mode and "Text mode" or "Page image mode", timeout = 2 })
+	ya.notify({ title = "Preview", content = text_mode and "Text mode" or "Page image mode", timeout = 2 })
 	ya.emit("peek", { tonumber(skip) or 0, force = true })
 end
 
