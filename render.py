@@ -388,6 +388,7 @@ def kill_server_processes(identity):
 def sweep_stale_servers():
     import psutil
 
+    server_pids = set()
     global_path = CACHE / ".server.json"
     if global_path.exists():
         try:
@@ -395,6 +396,9 @@ def sweep_stale_servers():
             process = psutil.Process(identity["server"])
             if process.create_time() != identity["server_created"]:
                 raise psutil.NoSuchProcess(identity["server"])
+            for field in ("word", "ppt", "server"):
+                if identity.get(field):
+                    server_pids.add(int(identity[field]))
         except (psutil.NoSuchProcess, Exception):
             try:
                 kill_server_processes(identity)
@@ -427,6 +431,34 @@ def sweep_stale_servers():
                 marker.unlink(missing_ok=True)
         except Exception:
             pass
+    # Untracked automation instances: a python owner killed between the COM
+    # spawn and its .owned-* marker write leaves an orphan no ledger knows.
+    # "-Embedding" only appears on automation instances - never on a user's
+    # interactive Word/PowerPoint - so cmdline matching is safe. Procs younger
+    # than 10s may be mid-registration and are skipped.
+    try:
+        tracked = set(server_pids)
+        for marker in CACHE.glob(".owned-*"):
+            try:
+                tracked.add(int(marker.name[7:].rsplit("-", 2)[1]))
+            except Exception:
+                pass
+        now = time.time()
+        for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+            try:
+                if proc.info["pid"] in tracked:
+                    continue
+                if (proc.info["name"] or "").lower() not in ("winword.exe", "powerpnt.exe"):
+                    continue
+                if now - (proc.info["create_time"] or 0) < 10:
+                    continue
+                cmd = " ".join(proc.info["cmdline"] or []).lower()
+                if "-embedding" in cmd:
+                    proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        pass
 
 
 def export_via_server(source, entry, timeout, kind="word"):
@@ -687,6 +719,47 @@ def convert_to_pdf(source, entry, stat):
     return metadata
 
 
+def embedded_thumb(source, entry):
+    """docProps/thumbnail.* inside the OOXML package -> JPEG in entry, or None.
+    Blank/template thumbnails (generator defaults) are rejected."""
+    import io
+
+    try:
+        from PIL import Image
+        with zipfile.ZipFile(source) as z:
+            name = next((n for n in z.namelist()
+                         if n.lower().startswith("docprops/thumbnail.")), None)
+            if not name:
+                return None
+            image = Image.open(io.BytesIO(z.read(name)))
+            image.load()
+        if image.width < 48 or image.height < 48:
+            return None
+        lo, hi = image.convert("L").getextrema()
+        if hi - lo < 24:
+            return None
+        entry.mkdir(parents=True, exist_ok=True)
+        out = entry / "thumb.jpg"
+        image.convert("RGB").save(out, "JPEG", quality=80)
+        return out
+    except Exception:
+        return None
+
+
+def thumb_for(source, entry):
+    """Fast preview image while conversion runs: embedded OOXML thumbnail
+    first (real document content), then the Explorer shell cache (covers
+    legacy OLE formats). Best effort; None means the caller falls back."""
+    thumb = embedded_thumb(source, entry)
+    if thumb:
+        return thumb
+    try:
+        import shell_thumb
+        return shell_thumb.get(source, entry)
+    except Exception:
+        return None
+
+
 def render(source, page, edge, probe=False, lock_timeout=None):
     source = source.resolve(strict=True)
     stat = source.stat()
@@ -694,6 +767,17 @@ def render(source, page, edge, probe=False, lock_timeout=None):
     key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     entry = CACHE / key
     edge = max(200, min(3200, edge))
+    if probe and not (entry / "metadata.json").exists():
+        # Fast path outside the cache lock: a conversion holds it for the
+        # whole COM export, so probes must not wait on it just to answer
+        # "not ready yet". Serve a thumbnail instead when one exists.
+        if (entry / "failed").exists():
+            raise ProbeMiss("PREVFAILED: conversion previously failed")
+        thumb = thumb_for(source, entry)
+        if thumb:
+            return {"thumb": str(thumb), "dir": str(entry), "page": 0,
+                    "probe_thumb": True}
+        raise ProbeMiss("Document is not converted yet")
     wait = PROBE_TIMEOUT if probe else (lock_timeout if lock_timeout is not None else TIMEOUT)
     with cache_lock(wait):
         prune(entry)

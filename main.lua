@@ -27,6 +27,8 @@ local state_ready = ya.sync(function(state, key, info)
 	state.entries[key] = info
 	state.pending = state.pending or {}
 	state.pending[key] = nil
+	state.thumbs = state.thumbs or {}
+	state.thumbs[key] = nil
 end)
 
 local state_pending = ya.sync(function(state, key)
@@ -40,6 +42,15 @@ local state_fail = ya.sync(function(state, key)
 	state.failed[key] = { t = os.time(), n = (type(prev) == "table" and prev.n or 0) + 1 }
 	state.pending = state.pending or {}
 	state.pending[key] = nil
+end)
+
+local state_thumb_get = ya.sync(function(state, key)
+	return state.thumbs and state.thumbs[key]
+end)
+
+local state_thumb_set = ya.sync(function(state, key, path)
+	state.thumbs = state.thumbs or {}
+	state.thumbs[key] = path
 end)
 
 local state_retry_arm = ya.sync(function(state, key)
@@ -126,7 +137,7 @@ local function text_cache(job)
 	for i = 1, #url do
 		h = (h * 33 + url:byte(i)) % 4294967296
 	end
-	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v8.ansi",
+	return string.format("%s\\yazi\\preview-cache\\%08x-%x-%x-%dx%d-v9.ansi",
 		os.getenv("LOCALAPPDATA") or "", h, cha.len or 0, math.floor(cha.mtime or 0),
 		job.area.w, job.area.h)
 end
@@ -162,12 +173,19 @@ local function script_peek(job, script)
 end
 
 local function word_fallback(job)
-	if ext_of(job.file.url) == "docx" then
+	local ext = ext_of(job.file.url)
+	if ext == "docx" then
 		local text = script_peek(job, "docx_text.py")
 		if text then
 			return ansi_peek(job, text)
 		end
 		return require("docx-preview"):peek(job)
+	end
+	if PPT_EXTS[ext] then
+		local text = script_peek(job, "pptx_text.py")
+		if text then
+			return ansi_peek(job, text)
+		end
 	end
 	ya.preview_widget(job, { ui.Clear(job.area), ui.Text({
 		ui.Line("Page image will appear when ready (text preview is unavailable for this format)"),
@@ -182,6 +200,12 @@ local function word_probe(job, key, edge)
 	if result and result.image then
 		state_ready(key, { dir = result.dir, edge = result.edge, pages = result.pages, png = result.png })
 		return show_image(job, result.image, result.page)
+	end
+	if result and result.thumb then
+		-- Conversion is still in-flight; pin the thumbnail so later peeks
+		-- (while pending) re-show it without spawning a probe each time.
+		state_thumb_set(key, result.thumb)
+		return show_image(job, result.thumb, job.skip)
 	end
 	if output and output.stderr and output.stderr:match("PREVFAILED") then
 		state_fail(key)
@@ -235,6 +259,10 @@ local function word_peek(job)
 			state_pending(key)
 			spawn_worker(job)
 		end
+		local thumb = state_thumb_get(key)
+		if thumb and fs.cha(Url(thumb)) then
+			return show_image(job, thumb, job.skip)
+		end
 		return word_fallback(job)
 	end
 
@@ -245,6 +273,11 @@ local function word_peek(job)
 	if result and result.image then
 		state_ready(key, { dir = result.dir, edge = result.edge, pages = result.pages, png = result.png })
 		return show_image(job, result.image, result.page)
+	end
+	if result and result.thumb then
+		state_thumb_set(key, result.thumb)
+		state_pending(key)
+		return show_image(job, result.thumb, job.skip)
 	end
 
 	state_pending(key)
