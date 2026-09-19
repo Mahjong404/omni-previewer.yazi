@@ -24,6 +24,8 @@ TIMEOUT = 30
 PROBE_TIMEOUT = 0.8
 CONNECT_TIMEOUT = 20
 SERVER_IDLE = 600
+SWEEP_INTERVAL = 30
+DEEP_SWEEP_INTERVAL = 600
 PIPE_NAME = r"\\.\pipe\yazi-docx-svc"
 PDFTOPPM = r"C:\software\CLI\poppler\Library\bin\pdftoppm.exe"
 PDFINFO = r"C:\software\CLI\poppler\Library\bin\pdfinfo.exe"
@@ -499,6 +501,21 @@ def sweep_stale_servers():
     # "-Embedding" only appears on automation instances - never on a user's
     # interactive Word/PowerPoint - so cmdline matching is safe. Procs younger
     # than 10s may be mid-registration and are skipped.
+    # Enumerating all system procs costs ~0.8s, so this deep scan runs at
+    # most once per DEEP_SWEEP_INTERVAL and only when an automation context
+    # exists (server identity or owned markers) - without one, no orphan
+    # can exist and the scan would find nothing.
+    deep_stamp = CACHE / ".sweep-deep"
+    try:
+        deep_due = not deep_stamp.exists() or \
+            time.time() - deep_stamp.stat().st_mtime > DEEP_SWEEP_INTERVAL
+    except OSError:
+        deep_due = True
+    context = bool(server_pids) or global_path.exists() or \
+        any(CACHE.glob(".owned-*"))
+    if not (deep_due and context):
+        return
+    deep_stamp.touch()
     try:
         tracked = set(server_pids)
         for marker in CACHE.glob(".owned-*"):
@@ -955,9 +972,25 @@ def render(source, page, edge, probe=False, lock_timeout=None):
                     "pages": pages_hint or 0, "probe_thumb": True}
         raise ProbeMiss("Document is not converted yet")
     wait = PROBE_TIMEOUT if probe else (lock_timeout if lock_timeout is not None else TIMEOUT)
-    with cache_lock(wait):
-        prune(entry)
-        sweep_stale_servers()
+    # Hygiene (cache prune + stale-server/orphan sweep) is not on the
+    # correctness path and costs ~0.9s (process_iter over all system
+    # procs), so it runs at most once per SWEEP_INTERVAL under a
+    # near-try-lock: a render arriving mid-sweep skips instead of
+    # queueing behind it.
+    stamp = CACHE / ".sweep"
+    try:
+        due = not stamp.exists() or \
+            time.time() - stamp.stat().st_mtime > SWEEP_INTERVAL
+    except OSError:
+        due = True
+    if due:
+        try:
+            with cache_lock(0.05):
+                stamp.touch()
+                prune(entry)
+                sweep_stale_servers()
+        except ProbeMiss:
+            pass
     # Per-entry lock: conversion serializes only against same-file workers;
     # other files proceed in parallel. Page waits and rasterization below run
     # entirely outside any lock - a slow slide export must not stall them.
