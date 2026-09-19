@@ -431,13 +431,20 @@ def register_owned(name, pid, created):
 def kill_server_processes(identity):
     import psutil
 
+    killed = []
     for pid_key, create_key, name in (("server", "server_created", None), ("word", "word_created", "winword.exe"),
                                       ("ppt", "ppt_created", "powerpnt.exe")):
         try:
             process = psutil.Process(identity[pid_key])
             if process.create_time() == identity[create_key] and (not name or process.name().lower() == name):
                 process.kill()
+                killed.append(process)
         except (psutil.NoSuchProcess, KeyError):
+            pass
+    if killed:
+        try:
+            psutil.wait_procs(killed, timeout=5)
+        except Exception:
             pass
 
 
@@ -517,12 +524,28 @@ def sweep_stale_servers():
         pass
 
 
+def code_fingerprint():
+    st = os.stat(__file__)
+    return f"{st.st_mtime_ns}-{st.st_size}"
+
+
 def server_request(payload, timeout, spawn=True):
     """One request on the preview pipe. TransportError = server unreachable
     (a fresh --serve may be spawned once); ServerBusy = connected but the
     reply did not arrive within timeout (the server is alive and queued)."""
     from multiprocessing.connection import Client
 
+    # Stale-code guard: a server started before this render.py version ran an
+    # old contract (e.g. synchronous tail vs generator) whose failures are
+    # silent. Kill it - and its Office procs - so the new code takes effect.
+    identity_path = CACHE / ".server.json"
+    try:
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        if identity.get("code") != code_fingerprint():
+            kill_server_processes(identity)
+            identity_path.unlink(missing_ok=True)
+    except Exception:
+        pass
     deadline = time.monotonic() + CONNECT_TIMEOUT
     conn, spawned = None, False
     while conn is None and time.monotonic() < deadline:
@@ -581,10 +604,23 @@ def serve():
     except Exception:
         pythoncom.CoUninitialize()
         sys.exit(1)
+    log_path = CACHE / ".server.log"
+
+    def log(msg):
+        try:
+            if log_path.exists() and log_path.stat().st_size > 256 * 1024:
+                log_path.write_text("", encoding="utf-8")
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} {msg}\n")
+        except Exception:
+            pass
+
     identity_path = CACHE / ".server.json"
     identity_path.write_text(json.dumps(
         {"server": os.getpid(), "server_created": psutil.Process().create_time(),
-         "word": owners["word"][0], "word_created": owners["word"][1]}), encoding="utf-8")
+         "word": owners["word"][0], "word_created": owners["word"][1],
+         "code": code_fingerprint()}), encoding="utf-8")
+    log(f"serve up pid={os.getpid()} code={code_fingerprint()} word={owners['word'][0]}")
 
     kind_locks = {"word": threading.Lock(), "ppt": threading.Lock()}
 
@@ -670,9 +706,9 @@ def serve():
                     next(gen)
                     pending_tails.append(gen)
                 except StopIteration:
-                    pass
-                except Exception:
-                    pass
+                    log("tail done")
+                except Exception as exc:
+                    log(f"tail died: {str(exc)[-300:]}")
             try:
                 _, _, conn, request = requests.get(
                     timeout=0.15 if pending_tails else 0.5)
@@ -683,9 +719,10 @@ def serve():
             try:
                 last_request[0] = time.time()
                 kind = request.get("kind", "word")
+                log(f"req kind={kind} text={bool(request.get('text'))} warm={bool(request.get('warm'))} "
+                    f"src={os.path.basename(str(request.get('source') or ''))}")
                 if request.get("warm"):
-                    app_for(kind)
-                    conn.send({"ok": True, "pages": 0})
+                    app_for(kind)  # watchdog closes without reading a reply
                     continue
                 if request.get("text"):
                     conn.send({"ok": True, "text": export_text(
@@ -709,7 +746,9 @@ def serve():
                         apps.pop(kind, None)
                         owners.pop(kind, None)
                 conn.send({"ok": True, **meta})
+                log(f"ok kind={kind} pages={meta.get('pages')}")
             except Exception as exc:
+                log(f"err kind={kind}: {str(exc)[-300:]}")
                 try:
                     conn.send({"ok": False, "error": str(exc)[-800:]})
                 except Exception:
@@ -718,7 +757,9 @@ def serve():
                 conn.close()
             if tail is not None:
                 pending_tails.append(tail)
+                log(f"tail queued kind={kind}")
     finally:
+        log("serve shutting down")
         for gen in pending_tails:
             try:
                 gen.close()  # lands in the tail's finally -> pres/document.Close
@@ -922,13 +963,28 @@ def render(source, page, edge, probe=False, lock_timeout=None):
     # entirely outside any lock - a slow slide export must not stall them.
     with cache_lock(wait, CACHE / f"{key}.lock"):
         manifest = entry / "metadata.json"
-        converted = not manifest.exists()
+        is_pdf = source.suffix.lower() == ".pdf"
+        done = manifest.exists()
+        if done and not is_pdf:
+            # Half-converted entries: the server tail died before the rest
+            # landed (stale server, crash, contract mismatch). metadata.json
+            # alone is not proof of completeness - re-convert to heal.
+            try:
+                prev = json.loads(manifest.read_text(encoding="utf-8"))
+                if prev.get("png"):
+                    done = all((entry / f"page-{i}.png").exists()
+                               for i in range(int(prev["pages"]))) \
+                        or (entry / "document.pdf").exists()
+                else:
+                    done = (entry / "document.pdf").exists()
+            except Exception:
+                done = False
+        converted = not done
         try:
             if converted and probe:
                 if (entry / "failed").exists():
                     raise ProbeMiss("PREVFAILED: conversion previously failed")
                 raise ProbeMiss("Document is not converted yet")
-            is_pdf = source.suffix.lower() == ".pdf"
             if converted:
                 entry.mkdir(exist_ok=True)
                 if is_pdf:
@@ -956,6 +1012,13 @@ def render(source, page, edge, probe=False, lock_timeout=None):
         deadline = time.monotonic() + 15
         while not image.exists() and time.monotonic() < deadline:
             time.sleep(0.2)
+        if not image.exists() and (entry / "document.pdf").exists():
+            # Individual slide export failed but the tail's PDF fallback
+            # landed - rasterize the page from it instead of failing.
+            try:
+                image = render_page(entry, page, edge, entry / "document.pdf")
+            except Exception:
+                pass
         if not image.exists():
             spawn_waiter(image, str(source), page)
             raise RuntimeError(f"slide image missing: {image.name}")
