@@ -611,11 +611,13 @@ def serve():
     listener = Listener(PIPE_NAME, family="AF_PIPE")
     warmed = {"ppt": False}
 
+    pending_tails = collections.deque()
+
     def watchdog():
         from multiprocessing.connection import Client
         while not stop.wait(5):
             idle = time.time() - last_request[0]
-            if idle > SERVER_IDLE:
+            if idle > SERVER_IDLE and not pending_tails:
                 break
             # Pre-warm PowerPoint during idle gaps so the first PPT hover
             # doesn't eat its ~5s COM boot. One-shot; failures stay lazy.
@@ -635,9 +637,11 @@ def serve():
 
     threading.Thread(target=watchdog, daemon=True).start()
     # Requests queue up so the main loop can interleave them with pending
-    # tail generators: a new request is served between slide exports instead
-    # of waiting for the previous deck's tail to finish.
-    requests = queue.Queue()
+    # tail generators. The acceptor pre-reads each request so cheap "text"
+    # requests can jump ahead of queued exports; tail work advances one step
+    # per loop iteration (never starves behind a request storm).
+    requests = queue.PriorityQueue()
+    seq = [0]
 
     def acceptor():
         while not stop.is_set():
@@ -645,33 +649,38 @@ def serve():
                 conn = listener.accept()
             except OSError:
                 break
-            requests.put(conn)
+            try:
+                request = conn.recv()
+            except (EOFError, OSError):
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                continue
+            prio = 0 if request.get("text") else 1
+            requests.put((prio, seq[0], conn, request))
+            seq[0] += 1
 
     threading.Thread(target=acceptor, daemon=True).start()
-    pending_tails = collections.deque()
     try:
         while not stop.is_set():
+            if pending_tails:
+                gen = pending_tails.popleft()
+                try:
+                    next(gen)
+                    pending_tails.append(gen)
+                except StopIteration:
+                    pass
+                except Exception:
+                    pass
             try:
-                conn = requests.get(timeout=0.5)
+                _, _, conn, request = requests.get(
+                    timeout=0.15 if pending_tails else 0.5)
             except queue.Empty:
-                conn = None
-            if conn is None:
-                # Idle slice: advance every pending tail one step, then block
-                # for the next request again.
-                for _ in range(len(pending_tails)):
-                    gen = pending_tails.popleft()
-                    try:
-                        next(gen)
-                        pending_tails.append(gen)
-                    except StopIteration:
-                        pass
-                    except Exception:
-                        pass
                 continue
             kind = None
             tail = None
             try:
-                request = conn.recv()
                 last_request[0] = time.time()
                 kind = request.get("kind", "word")
                 if request.get("warm"):
@@ -948,6 +957,7 @@ def render(source, page, edge, probe=False, lock_timeout=None):
         while not image.exists() and time.monotonic() < deadline:
             time.sleep(0.2)
         if not image.exists():
+            spawn_waiter(image, str(source), page)
             raise RuntimeError(f"slide image missing: {image.name}")
         os.utime(image, None)
     else:
@@ -962,6 +972,7 @@ def render(source, page, edge, probe=False, lock_timeout=None):
                 while not pdf.exists() and time.monotonic() < deadline:
                     time.sleep(0.2)
             if not pdf.exists():
+                spawn_waiter(entry / "document.pdf", str(source), page)
                 pdf = entry / "head.pdf"
         targets = {page, page + 1} | ({0, 1, 2} if converted else set())
         for target in sorted(t for t in targets if 0 <= t < metadata["pages"] and t != page):
@@ -980,6 +991,36 @@ def render(source, page, edge, probe=False, lock_timeout=None):
             "cached": not converted, "converted": converted}
 
 
+def waiter(path, url, page, marker, timeout=90):
+    """Background poll: when the awaited file lands (server tail still
+    exporting), emit a plugin refresh so the page paints without re-seek.
+    Deduped per file by `marker`."""
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            if path.exists():
+                notify(url, page)
+                return
+            time.sleep(0.5)
+    finally:
+        marker.unlink(missing_ok=True)
+
+
+def spawn_waiter(path, url, page):
+    try:
+        marker = path.with_name(".wait-" + path.name)
+        with marker.open("xb"):
+            pass
+    except OSError:
+        return
+    subprocess.Popen(
+        [sys.executable, "-X", "utf8", __file__, "--wait",
+         str(path), url, str(page), str(marker)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+        close_fds=True)
+
+
 def notify(url, page):
     try:
         subprocess.run([YA, "emit", "plugin", "omni-previewer", f"refresh|{url}|{page}"],
@@ -996,6 +1037,8 @@ if __name__ == "__main__":
             export_office(Path(args[1]), Path(args[2]))
         elif args[0] == "--serve":
             serve()
+        elif args[0] == "--wait":
+            waiter(Path(args[1]), args[2], int(args[3]), Path(args[4]))
         else:
             probe = "--probe" in args
             url = args[args.index("--notify") + 1] if "--notify" in args else None

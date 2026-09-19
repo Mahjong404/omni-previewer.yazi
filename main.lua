@@ -172,7 +172,7 @@ local function script_peek(job, script)
 	return text
 end
 
-local function word_fallback(job, deep)
+local function word_fallback(job)
 	local ext = ext_of(job.file.url)
 	if ext == "docx" then
 		local text = script_peek(job, "docx_text.py")
@@ -181,10 +181,11 @@ local function word_fallback(job, deep)
 		end
 		return require("docx-preview"):peek(job)
 	end
-	if deep and WORD_EXTS[ext] then
+	if WORD_EXTS[ext] then
 		-- Legacy OLE Word formats: text comes from the persistent server
-		-- (Word Content.Text), no OOXML fast path exists for them. Only
-		-- used in explicit text mode - too expensive as a pending filler.
+		-- (Word Content.Text), no OOXML fast path exists for them. Text
+		-- requests jump the server's request queue, and the result lands
+		-- in the ansi cache - the COM open is paid once per file.
 		local text = script_peek(job, "doc_text.py")
 		if text then
 			return ansi_peek(job, text)
@@ -237,7 +238,7 @@ local function word_peek(job)
 	local key = identity(job)
 	local text_mode, failed, info, pending = state_get(key)
 	if text_mode then
-		return word_fallback(job, true)
+		return word_fallback(job)
 	end
 	if failed then
 		-- Transient conversion failures used to stick for the whole session:
@@ -247,7 +248,7 @@ local function word_peek(job)
 			state_retry_arm(key)
 			spawn_worker(job)
 		end
-		return word_fallback(job, true)
+		return word_fallback(job)
 	end
 
 	local edge = pane_edge(job)
