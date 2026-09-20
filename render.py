@@ -26,7 +26,6 @@ CONNECT_TIMEOUT = 20
 SERVER_IDLE = 600
 SWEEP_INTERVAL = 30
 DEEP_SWEEP_INTERVAL = 600
-FAILED_TTL = 120
 PIPE_NAME = r"\\.\pipe\yazi-docx-svc"
 PDFTOPPM = r"C:\software\CLI\poppler\Library\bin\pdftoppm.exe"
 PDFINFO = r"C:\software\CLI\poppler\Library\bin\pdfinfo.exe"
@@ -547,71 +546,6 @@ def code_fingerprint():
     return f"{st.st_mtime_ns}-{st.st_size}"
 
 
-def detached_flags():
-    """Creation flags for background helpers. CREATE_BREAKAWAY_FROM_JOB
-    matters when the spawner is a yazi task: plugin commands run inside a
-    job object, and when yazi drops a task on scroll the job kills the
-    whole tree - including a detached preview server mid-conversion (the
-    'dies every few seconds during rapid scrolling' failure mode)."""
-    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
-    try:
-        flags |= subprocess.CREATE_BREAKAWAY_FROM_JOB  # py3.8+
-    except AttributeError:
-        pass
-    return flags
-
-
-SVC_TASK = "yazi-omni-previewer-svc"
-
-
-def spawn_server():
-    """Start --serve outside any job object. Yazi runs plugin commands in
-    a job whose close kills the whole process tree - including a detached
-    --serve grandchild mid-conversion (rapid scrolling killed the server
-    every few seconds). CREATE_BREAKAWAY_FROM_JOB is denied inside a job,
-    so the escape is Task Scheduler: /run parents the server to svchost in
-    the interactive session, outside the job entirely. The task is created
-    only when missing: `/create /f` on a running task restarts (kills) its
-    instance, which is exactly the death loop this exists to prevent."""
-    # argv form: schtasks stores /tr verbatim in the task XML, so plain
-    # quotes - no shell-style \" escapes - or the stored command is broken.
-    tr = f'"{sys.executable}" -X utf8 "{__file__}" --serve'
-    try:
-        exists = subprocess.run(
-            ["schtasks", "/query", "/tn", SVC_TASK],
-            capture_output=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW).returncode == 0
-        if exists or subprocess.run(
-                ["schtasks", "/create", "/tn", SVC_TASK, "/sc", "once", "/st", "00:00",
-                 "/tr", tr, "/f", "/it"],
-                capture_output=True, timeout=20,
-                creationflags=subprocess.CREATE_NO_WINDOW).returncode == 0:
-            ran = subprocess.run(
-                ["schtasks", "/run", "/tn", SVC_TASK],
-                capture_output=True, timeout=20,
-                creationflags=subprocess.CREATE_NO_WINDOW)
-            if ran.returncode == 0:
-                return
-    except Exception:
-        pass
-    CACHE.mkdir(parents=True, exist_ok=True)
-    err = open(CACHE / ".server.err", "ab")
-    try:
-        try:
-            subprocess.Popen(
-                [sys.executable, "-X", "utf8", __file__, "--serve"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
-                creationflags=detached_flags(), close_fds=True)
-        except OSError:
-            subprocess.Popen(
-                [sys.executable, "-X", "utf8", __file__, "--serve"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
-                close_fds=True)
-    finally:
-        err.close()
-
-
 def server_request(payload, timeout, spawn=True):
     """One request on the preview pipe. TransportError = server unreachable
     (a fresh --serve may be spawned once); ServerBusy = connected but the
@@ -631,25 +565,17 @@ def server_request(payload, timeout, spawn=True):
         pass
     deadline = time.monotonic() + CONNECT_TIMEOUT
     conn, spawned = None, False
-    spawn_mark = CACHE / ".spawning"
     while conn is None and time.monotonic() < deadline:
         try:
             conn = Client(PIPE_NAME, family="AF_PIPE")
         except (FileNotFoundError, OSError):
             if not spawned and spawn:
-                # Dedupe spawn storms: every failed client spawning its own
-                # server re-triggers the schtasks restart kill (or job kill).
-                # One .spawning claim per 20s window; losers just keep polling.
-                fresh = False
-                try:
-                    fresh = (spawn_mark.exists()
-                             and time.time() - spawn_mark.stat().st_mtime < 20)
-                    if not fresh:
-                        spawn_mark.touch()  # claim (or refresh a stale one)
-                except OSError:
-                    pass
-                if not fresh:
-                    spawn_server()
+                subprocess.Popen(
+                    [sys.executable, "-X", "utf8", __file__, "--serve"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+                    close_fds=True,
+                )
                 spawned = True
             time.sleep(0.3)
     if conn is None:
@@ -778,23 +704,13 @@ def serve():
                 break
             try:
                 request = conn.recv()
-                prio = 0 if request.get("text") else 1
             except (EOFError, OSError):
                 try:
                     conn.close()
                 except Exception:
                     pass
                 continue
-            except Exception as exc:
-                # A malformed payload must not kill the acceptor thread -
-                # a dead acceptor leaves a live-but-deaf server holding the
-                # mutex while every client times out.
-                log(f"acceptor dropped request: {str(exc)[-200:]}")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                continue
+            prio = 0 if request.get("text") else 1
             requests.put((prio, seq[0], conn, request))
             seq[0] += 1
 
@@ -846,17 +762,6 @@ def serve():
                             raise
                         apps.pop(kind, None)
                         owners.pop(kind, None)
-                # The server writes the manifest too: a yazi job kill can
-                # take out the client worker mid-conversion, and without this
-                # the exported pages survive but the entry stays "unconverted"
-                # forever (manifest missing -> reconvert -> repeat).
-                try:
-                    e = Path(request["entry"])
-                    e.mkdir(parents=True, exist_ok=True)
-                    (e / "metadata.json").write_text(
-                        json.dumps(meta), encoding="utf-8")
-                except Exception:
-                    pass
                 conn.send({"ok": True, **meta})
                 log(f"ok kind={kind} pages={meta.get('pages')}")
             except Exception as exc:
@@ -1031,49 +936,18 @@ def write_pages_record(source, pages):
         pass
 
 
-def thumb_for(source, entry, edge):
+def thumb_for(source, entry):
     """Fast preview image while conversion runs: embedded OOXML thumbnail
     first (real document content), then the Explorer shell cache (covers
-    legacy OLE formats). Best effort; None means the caller falls back.
-    The thumbnail is upscaled to the pane edge so it fills the preview
-    like a real page image instead of floating as a tiny placeholder."""
+    legacy OLE formats). Best effort; None means the caller falls back."""
     thumb = embedded_thumb(source, entry)
-    if not thumb:
-        try:
-            import shell_thumb
-            thumb = shell_thumb.get(source, entry)
-        except Exception:
-            thumb = None
-    if not thumb:
-        return None
+    if thumb:
+        return thumb
     try:
-        from PIL import Image
-        image = Image.open(thumb)
-        image.load()
-        longest = max(image.width, image.height)
-        if longest < edge:
-            scale = edge / longest
-            image = image.resize((max(1, round(image.width * scale)),
-                                  max(1, round(image.height * scale))),
-                                 Image.LANCZOS)
-            image.convert("RGB").save(thumb, "JPEG", quality=85)
+        import shell_thumb
+        return shell_thumb.get(source, entry)
     except Exception:
-        pass
-    return thumb
-
-
-def failed_fresh(entry):
-    """A failed marker only suppresses reconversion for FAILED_TTL seconds.
-    Markers written during congestion storms (or for a file that has since
-    been fixed) must not poison the entry forever - expiry turns them back
-    into a normal miss so the next hover retries."""
-    try:
-        if time.time() - (entry / "failed").stat().st_mtime > FAILED_TTL:
-            (entry / "failed").unlink(missing_ok=True)
-            return False
-        return True
-    except OSError:
-        return False
+        return None
 
 
 def render(source, page, edge, probe=False, lock_timeout=None):
@@ -1090,9 +964,9 @@ def render(source, page, edge, probe=False, lock_timeout=None):
         pages_hint = quick_pages(source)
         if pages_hint:
             write_pages_record(source, pages_hint)
-        if failed_fresh(entry):
+        if (entry / "failed").exists():
             raise ProbeMiss("PREVFAILED: conversion previously failed")
-        thumb = thumb_for(source, entry, edge)
+        thumb = thumb_for(source, entry)
         if thumb:
             return {"thumb": str(thumb), "dir": str(entry), "page": 0,
                     "pages": pages_hint or 0, "probe_thumb": True}
@@ -1141,7 +1015,7 @@ def render(source, page, edge, probe=False, lock_timeout=None):
         converted = not done
         try:
             if converted and probe:
-                if failed_fresh(entry):
+                if (entry / "failed").exists():
                     raise ProbeMiss("PREVFAILED: conversion previously failed")
                 raise ProbeMiss("Document is not converted yet")
             if converted:
@@ -1155,13 +1029,6 @@ def render(source, page, edge, probe=False, lock_timeout=None):
             metadata = json.loads(manifest.read_text(encoding="utf-8"))
             write_pages_record(source, metadata["pages"])
             page = max(0, min(page, metadata["pages"] - 1))
-        except TransportError:
-            # ServerBusy / dropped pipe is transient congestion - the server
-            # keeps converting in the background and its tail still writes
-            # the artifacts. Poisoning the entry (failed marker + rmtree)
-            # here is what stranded previews in Text mode under scroll
-            # storms.
-            raise
         except Exception as exc:
             if not probe:
                 shutil.rmtree(entry, ignore_errors=True)
@@ -1175,9 +1042,7 @@ def render(source, page, edge, probe=False, lock_timeout=None):
         # PPT path: slide 1..3 arrive first; the rest are still being
         # exported in the server tail - poll briefly before giving up.
         image = entry / f"page-{page}.png"
-        # Probes answer on the UI thread: fail fast so a queued tail shows
-        # the fallback instead of freezing the pane. Workers keep 15s.
-        deadline = time.monotonic() + (1.5 if probe else 15)
+        deadline = time.monotonic() + 15
         while not image.exists() and time.monotonic() < deadline:
             time.sleep(0.2)
         if not image.exists() and (entry / "document.pdf").exists():
@@ -1199,7 +1064,7 @@ def render(source, page, edge, probe=False, lock_timeout=None):
         if not is_pdf and not pdf.exists():
             head = metadata.get("head") or 0
             if page >= head:
-                deadline = time.monotonic() + (1.5 if probe else 15)
+                deadline = time.monotonic() + 15
                 while not pdf.exists() and time.monotonic() < deadline:
                     time.sleep(0.2)
             if not pdf.exists():
@@ -1244,15 +1109,11 @@ def spawn_waiter(path, url, page):
             pass
     except OSError:
         return
-    try:
-        flags = detached_flags()
-    except Exception:
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
     subprocess.Popen(
         [sys.executable, "-X", "utf8", __file__, "--wait",
          str(path), url, str(page), str(marker)],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=flags,
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
         close_fds=True)
 
 
@@ -1271,11 +1132,6 @@ if __name__ == "__main__":
         if args[0] == "--export":
             export_office(Path(args[1]), Path(args[2]))
         elif args[0] == "--serve":
-            try:
-                CACHE.mkdir(parents=True, exist_ok=True)
-                sys.stderr = open(CACHE / ".server.err", "a", encoding="utf-8")
-            except Exception:
-                pass
             serve()
         elif args[0] == "--wait":
             waiter(Path(args[1]), args[2], int(args[3]), Path(args[4]))

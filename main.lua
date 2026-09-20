@@ -265,7 +265,7 @@ local function word_peek(job)
 	if pending then
 		-- pending is only a timestamped guess that a worker is in-flight; if it
 		-- is stale the worker died without notifying - kick a fresh one.
-		if os.time() - pending > 20 then
+		if os.time() - pending > 60 then
 			state_pending(key)
 			spawn_worker(job)
 		end
@@ -287,12 +287,10 @@ local function word_peek(job)
 	if result and result.thumb then
 		state_thumb_set(key, result.thumb)
 		state_pending(key)
-		spawn_worker(job)
 		return show_image(job, result.thumb, job.skip)
 	end
 
 	state_pending(key)
-	spawn_worker(job)
 	word_fallback(job)
 end
 
